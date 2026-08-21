@@ -1,0 +1,155 @@
+# ============================================================
+# Vector 测试配置：demo_logs → 解析日志自带 RFC3339 时间 → 按事件时间分区写入 OSS
+# ============================================================
+
+# 关键点：key_prefix 用模板语法引用事件时间 (非 Vector 处理时间)，日志按事件时间分割目录
+# 用法：
+#   docker run --rm -v "$PWD/vector-test.yaml:/etc/vector/vector-test.yaml:ro" \
+#              -v "$PWD/oss-secrets.json:/etc/vector/oss-secrets.json:ro" \
+#              timberio/vector:latest-alpine --config /etc/vector/vector-test.yaml
+#
+# 产物前缀为 test/demo/year=.../month=.../day=.../hour=.../minute=...
+
+data_dir: /vector-data-dir
+
+# ------------------------------------------------------------------
+# 密钥管理：从本地 JSON 文件读取
+# ------------------------------------------------------------------
+secret:
+  oss_credentials:
+    type: file
+    path: /etc/vector/oss-secrets.json
+
+# ------------------------------------------------------------------
+# 数据源：使用内置 demo_logs 生成测试数据
+# ------------------------------------------------------------------
+sources:
+  demo:
+    type: demo_logs
+    format: shuffle             # 从 lines 中随机取行，行内是 JSON，timestamp 为 RFC3339
+    lines:
+      - '{"timestamp":"2026-08-14T08:30:45.123456Z","level":"INFO","message":"order created","order_id":1001}'
+      - '{"timestamp":"2026-08-14T09:15:22.654321+08:00","level":"ERROR","message":"payment failed","order_id":1002}'
+      - '{"timestamp":"2026-08-14T10:05:11.987654Z","level":"WARN","message":"cache miss","key":"user_1"}'
+    interval: 1                 # 每批间隔秒数
+    count: 0                    # 总行数，0 = 无限生成
+
+# ------------------------------------------------------------------
+# 转换：解析 JSON + 生成分区字段
+# ------------------------------------------------------------------
+transforms:
+  # 解析 JSON 行，提取事件时间戳
+  parse:
+    type: remap
+    inputs: [demo]
+    source: |
+      # 应用打点日志是 JSON 行 (ndjson)：
+      #   1. parse_json 解析行内字段并展开 (. = parsed)
+      #   2. 解析 timestamp (RFC3339) 作为事件时间；缺失或格式不符 → 退回当前处理时间
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = parsed                                # 字段合并/展开 (此时 timestamp 为字符串)
+        ts, ts_err = parse_timestamp(.timestamp, format: "%+")   # "%+" = RFC3339
+        if ts_err == null {
+          .timestamp = ts                         # 覆盖为时间戳类型
+        } else {
+          del(.timestamp)                         # 丢弃字符串时间戳，避免误用
+          .timestamp = now()                      # 退回当前处理时间
+          log("timestamp missing or not RFC3339, using now(): " + ts_err, level: "warn")
+        }
+      } else if err != null {
+        log("message is not valid JSON line: " + err, level: "warn")
+      } else {
+        log("message is JSON but not an object", level: "warn")
+      }
+
+  # 从事件时间戳生成 Hive 风格分区字段 (北京时间)
+  partition:
+    type: remap
+    inputs: [parse]
+    source: |
+      # 按北京时间格式化分区字段，用于 key_prefix 模板
+      .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+      .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+      .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+      .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+      .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
+      .application = "ebike-saas"     # 测试自定义字段
+      .env = "test"
+
+# ------------------------------------------------------------------
+# 输出目标：JSON 格式写入 OSS
+# ------------------------------------------------------------------
+sinks:
+  aliyun_oss_test:
+    type: aws_s3
+    inputs: [partition]
+
+    # OSS 连接配置
+    bucket: vector-demo
+    region: cn-shenzhen
+    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    force_path_style: false      # OSS 仅支持虚拟托管寻址
+
+    # 事件时间分割：模板引用解析后的事件时间 (依赖上方 parse + partition transform)
+    key_prefix: "test/demo/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/minute={{ partition_minute }}/"
+    # 处理时间分割 (默认行为，无需 transform)：strftime 用 Vector 处理时间 + timezone 字段
+    # key_prefix: "test/demo/year=%Y/month=%m/day=%d/hour=%H/minute=%M/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"      # 文件名时间戳是处理时间，仅用于唯一排序；分区按事件时间
+    filename_append_uuid: true
+    compression: gzip
+    encoding:
+      codec: json                   # 测试用 json 便于核对字段；生产用 raw_message
+    framing:
+      method: newline_delimited
+
+    # 批次控制
+    batch:
+      timeout_secs: 15
+      max_bytes: 10485760
+      max_events: 100000
+
+    # 认证
+    auth:
+      access_key_id: SECRET[oss_credentials.access_key_id]
+      secret_access_key: SECRET[oss_credentials.secret_access_key]
+
+  # ------------------------------------------------------------------
+  # 输出目标：Parquet 列式格式写入 OSS
+  # ------------------------------------------------------------------
+  aliyun_oss_test_parquet:
+    type: aws_s3
+    inputs: [partition]
+
+    # OSS 连接配置 (同上)
+    bucket: vector-demo
+    region: cn-shenzhen
+    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    force_path_style: false
+
+    # 对象路径：Hive 分区格式 (无 minute，Parquet 按小时聚合)
+    key_prefix: "test/demo_parquet/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"
+    filename_append_uuid: true
+
+    # 写入格式：Parquet 列式 (下游 Athena/EMR 分析更友好)
+    encoding:
+      codec: json                # 占位，batch_encoding 会接管
+    batch_encoding:
+      codec: parquet
+      schema_mode: auto_infer    # 自动推断 schema，无需预定义
+      compression:
+        algorithm: snappy        # 列页内压缩：snappy (快) | zstd (高压缩比) | gzip | lz4 | none
+
+    # 批次控制
+    batch:
+      timeout_secs: 15
+      max_bytes: 10485760        # 10 MB
+      max_events: 100000
+
+    # 认证
+    auth:
+      access_key_id: SECRET[oss_credentials.access_key_id]
+      secret_access_key: SECRET[oss_credentials.secret_access_key]

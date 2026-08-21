@@ -1,0 +1,39 @@
+
+name: vector-file-to-oss
+
+services:
+  python-log-gen:
+    image: python:3-alpine
+    restart: unless-stopped
+
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+      - app-logs:/logs
+
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+
+    command: python /app/gen-log.py
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - python-log-gen
+
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./secrets/oss-secrets.json:/etc/vector/oss-secrets.json:ro
+      - vector-data:/vector-data-dir
+      - app-logs:/logs:ro
+
+    environment:
+      TZ: Asia/Shanghai
+      VECTOR_LOG: info
+      NO_PROXY: "aliyuncs.com,oss-cn-shenzhen.aliyuncs.com,vector-demo.oss-cn-shenzhen.aliyuncs.com,localhost,127.0.0.1"
+      no_proxy: "aliyuncs.com,oss-cn-shenzhen.aliyuncs.com,vector-demo.oss-cn-shenzhen.aliyuncs.com,localhost,127.0.0.1"
+
+volumes:
+  app-logs:
+  vector-data:

@@ -1,0 +1,147 @@
+# ============================================================
+# Vector 配置：本地日志 → 阿里云 OSS (JSON + Parquet 双输出)
+# ============================================================
+
+# Vector 内部数据目录，存放 file source 的 checkpoint (断点续传) 和 disk buffer
+# 容器内路径，必须挂载命名卷或 bind mount 持久化
+data_dir: /vector-data-dir
+
+# ------------------------------------------------------------------
+# 密钥管理：从本地 JSON 文件读取，不在 YAML 中明文写入
+# ------------------------------------------------------------------
+secret:
+  oss_credentials:
+    type: file
+    # 容器内路径，对应 compose.yaml 中挂载的 secrets/oss-secrets.json
+    path: /etc/vector/oss-secrets.json
+
+# ------------------------------------------------------------------
+# 数据源：读取本地日志文件
+# ------------------------------------------------------------------
+sources:
+  local_logs:
+    type: file
+    include:
+      - /logs/**/*.log           # 递归匹配所有 .log 文件
+    read_from: beginning         # 首次启动从头读；已有 checkpoint 则断点续传
+    ignore_checkpoints: false    # 保留已有 checkpoint，不清空
+    fingerprint:
+      strategy: checksum         # 用文件内容前 N 行 CRC 做指纹，跨日志轮转可靠
+
+# ------------------------------------------------------------------
+# 转换：解析 JSON + 生成分区字段
+# ------------------------------------------------------------------
+transforms:
+  # 第一步：解析 JSON 行，提取事件时间戳
+  parse_ts:
+    type: remap
+    inputs: [local_logs]
+    source: |
+      raw_line = .message        # 保留原始日志行 (raw_message 编码需要)
+      ingest_ts = .timestamp     # Vector 处理时间 (备用)
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)    # 将 JSON 字段提升到顶层 (level/order_id 等)
+        .message = raw_line      # 恢复原始日志行作为 message
+        ts, ts_err = parse_timestamp(parsed.timestamp, format: "%+")
+        if ts_err == null {
+          .timestamp = ts        # 事件时间戳有效，用它
+        } else {
+          del(.timestamp)
+          .timestamp = ingest_ts # 解析失败，回退到处理时间
+          log("timestamp missing or not RFC3339, using ingestion time: " + ts_err, level: "warn")
+        }
+      } else if err != null {
+        log("message is not valid JSON line: " + err, level: "warn")
+      } else {
+        log("message is JSON but not an object", level: "warn")
+      }
+
+  # 第二步：从事件时间戳生成 Hive 风格分区字段 (北京时间)
+  partition:
+    type: remap
+    inputs: [parse_ts]
+    source: |
+      # 按北京时间格式化分区字段，用于 key_prefix 模板
+      .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+      .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+      .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+      .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+      .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
+
+# ------------------------------------------------------------------
+# 输出目标：JSON 格式写入 OSS
+# ------------------------------------------------------------------
+sinks:
+  aliyun_oss:
+    type: aws_s3                 # OSS 兼容 S3 API，用 aws_s3 sink
+    inputs: [partition]
+
+    # OSS 连接配置
+    bucket: vector-demo
+    region: cn-shenzhen
+    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    force_path_style: false      # OSS 仅支持虚拟托管寻址 (<bucket>.oss-<region>.aliyuncs.com)
+
+    # 对象路径：Hive 分区格式 (year/month/day/hour/minute)
+    key_prefix: "log_json/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/minute={{ partition_minute }}/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"   # Unix 时间戳作为文件名前缀
+    filename_append_uuid: true   # 追加 UUID 防覆盖
+
+    # 写入格式：原始日志行 (换行分隔)，下游直接消费无需剥 Vector 包裹层
+    compression: gzip
+    encoding:
+      codec: raw_message         # 对象内容 = 原始日志行
+    framing:
+      method: newline_delimited
+
+    # 批次控制：攒够或超时后 flush
+    batch:
+      timeout_secs: 15           # 最长等待 15 秒
+      max_bytes: 10485760        # 10 MB
+      max_events: 100000
+
+    # 认证：从 secret 文件引用
+    auth:
+      access_key_id: SECRET[oss_credentials.access_key_id]
+      secret_access_key: SECRET[oss_credentials.secret_access_key]
+
+  # ------------------------------------------------------------------
+  # 输出目标：Parquet 列式格式写入 OSS
+  # ------------------------------------------------------------------
+  aliyun_oss_parquet:
+    type: aws_s3
+    inputs: [partition]
+
+    # OSS 连接配置 (同上)
+    bucket: vector-demo
+    region: cn-shenzhen
+    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    force_path_style: false
+
+    # 对象路径：Hive 分区格式 (无 minute，Parquet 按小时聚合)
+    key_prefix: "log_parquet/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"
+    filename_append_uuid: true
+
+    # 写入格式：Parquet 列式 (下游 Athena/EMR 分析更友好)
+    encoding:
+      codec: json                # 占位，batch_encoding 会接管
+    batch_encoding:
+      codec: parquet
+      schema_mode: auto_infer    # 自动推断 schema，无需预定义
+      compression:
+        algorithm: snappy        # 列页内压缩：snappy (快) | zstd (高压缩比) | gzip | lz4 | none
+
+    # 批次控制
+    batch:
+      timeout_secs: 15
+      max_bytes: 10485760        # 10 MB
+      max_events: 100000
+
+    # 认证
+    auth:
+      access_key_id: SECRET[oss_credentials.access_key_id]
+      secret_access_key: SECRET[oss_credentials.secret_access_key]

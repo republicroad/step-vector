@@ -1,0 +1,111 @@
+
+name: vector-file-to-rustfs
+
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      RUSTFS_ROOT_USER: rustfsadmin
+      RUSTFS_ROOT_PASSWORD: rustfsadmin
+      RUSTFS_VOLUMES: /data
+      RUSTFS_CONSOLE_ENABLE: "true"
+      no_proxy: "localhost,127.0.0.1"
+      NO_PROXY: "localhost,127.0.0.1"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  bucket-init:
+    image: amazon/aws-cli:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: rustfsadmin
+      AWS_SECRET_ACCESS_KEY: rustfsadmin
+      AWS_DEFAULT_REGION: us-east-1
+      no_proxy: "rustfs,localhost,127.0.0.1"
+      NO_PROXY: "rustfs,localhost,127.0.0.1"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for RustFS to be ready..."
+        sleep 3
+        echo "Creating buckets..."
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://log-data
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://log-test
+        echo "Buckets created successfully"
+    restart: "no"
+
+  python-log-gen:
+    image: python:3-alpine
+    restart: unless-stopped
+    depends_on:
+      bucket-init:
+        condition: service_completed_successfully
+
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+      - app-logs:/logs
+
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+
+    command: python /app/gen-log.py
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      python-log-gen:
+        condition: service_started
+      rustfs:
+        condition: service_healthy
+
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./secrets/rustfs-secrets.json:/etc/vector/rustfs-secrets.json:ro
+      - vector-data:/vector-data-dir
+      - app-logs:/logs:ro
+
+    environment:
+      TZ: Asia/Shanghai
+      VECTOR_LOG: info
+      no_proxy: "rustfs,localhost,127.0.0.1"
+      NO_PROXY: "rustfs,localhost,127.0.0.1"
+
+  duckdb:
+    image: duckdb/duckdb:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      no_proxy: "rustfs,localhost,127.0.0.1"
+      NO_PROXY: "rustfs,localhost,127.0.0.1"
+    volumes:
+      - duckdb-ext:/root/.duckdb/extensions
+      - ./duckdb/queries.sql:/queries/queries.sql:ro
+    entrypoint: ["/duckdb", "-batch"]
+    command:
+      - "-c"
+      - "CREATE OR REPLACE SECRET rustfs (TYPE s3, PROVIDER config, KEY_ID 'rustfsadmin', SECRET 'rustfsadmin', ENDPOINT 'rustfs:9000', REGION 'us-east-1', URL_STYLE 'path', USE_SSL false);"
+      - "-f"
+      - /queries/queries.sql
+    profiles:
+      - query
+
+volumes:
+  app-logs:
+  vector-data:
+  rustfs-data:
+  duckdb-ext:
