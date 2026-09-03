@@ -1,0 +1,67 @@
+# ============================================================
+# Vector 采集演示：MongoDB 结构化日志 (JSON) → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/mongodb/$SOURCE_TOKEN
+# 演示要点：file source + parse_json 解析 MongoDB 4.4+ JSON 日志
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  mongod_log:
+    type: file
+    include:
+      - /var/log/mongodb/mongod.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_mongodb:
+    type: remap
+    inputs: [mongod_log]
+    source: |
+      # 行示例: {"t":{"$date":"2026-09-03T10:00:00.123+00:00"},"s":"I","c":"NETWORK","id":22944,"ctx":"conn12","msg":"Connection ended","attr":{...}}
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        .severity = parsed.s
+        .component = parsed.c
+        .mongo_id = parsed.id
+        .context = parsed.ctx
+        .message = parsed.msg
+        .attributes = parsed.attr
+        if is_object(parsed.t) {
+          ts, ts_err = parse_timestamp(parsed.t."$date", format: "%+")
+          if ts_err == null {
+            .timestamp = ts
+          }
+        }
+      } else {
+        log("mongodb parse failed (line not JSON): partial or old format", level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_mongodb]
+    path: /var/lib/vector/output/mongodb-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_mongodb]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_mongodb]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

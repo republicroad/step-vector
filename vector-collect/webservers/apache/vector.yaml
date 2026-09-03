@@ -1,0 +1,89 @@
+# ============================================================
+# Vector 采集演示：Apache httpd access/error 日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/apache/$SOURCE_TOKEN
+# 演示要点：file source tail + parse_apache_log!(combined) 原生解析函数
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  apache_access:
+    type: file
+    include:
+      - /usr/local/apache2/logs/access_log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  apache_error:
+    type: file
+    include:
+      - /usr/local/apache2/logs/error_log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  # access_log 为 Apache combined 格式，Vector 原生解析函数
+  parse_access:
+    type: remap
+    inputs: [apache_access]
+    source: |
+      .log_source = "access"
+      # 行示例: 172.18.0.5 - - [03/Sep/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 3477 "-" "curl/8.5.0"
+      parsed, err = parse_apache_log(.message, "combined")
+      if err == null {
+        . = merge!(., parsed)
+        .timestamp = parse_timestamp!(.timestamp, format: "%d/%b/%Y:%H:%M:%S %z")
+      } else {
+        log("apache access parse failed: " + err, level: "warn")
+      }
+
+  # error_log 为 Apache 错误日志格式（模块:级别），用正则提取
+  parse_error:
+    type: remap
+    inputs: [apache_error]
+    source: |
+      .log_source = "error"
+      # 行示例: [Wed Sep 03 10:00:00.123456 2026] [core:error] [pid 12:tid 140234] [client 172.18.0.5:41234] AH00135: Invalid URI in request GET /missing HTTP/1.1
+      parsed, err = parse_regex(.message, r'^\[(?P<ts>[A-Za-z]{3} [A-Za-z]{3} \d{2} \d{2}:\d{2}:\d{2}\.\d+ \d{4})\] \[(?P<module>[A-Za-z]+):(?P<level>\w+)\] \[pid (?P<pid>\d+)(?::tid (?P<tid>\d+))?\](?: \[client (?P<client>[^\]]+)\])? (?P<msg>.*)$')
+      if err == null {
+        .module = parsed.module
+        .level = parsed.level
+        .pid = parsed.pid
+        .client = parsed.client
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%a %b %d %H:%M:%S.%f %Y")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("apache error parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_access, parse_error]
+    path: /var/lib/vector/output/apache-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_access, parse_error]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_access, parse_error]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

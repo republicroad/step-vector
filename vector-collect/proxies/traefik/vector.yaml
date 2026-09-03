@@ -1,0 +1,100 @@
+# ============================================================
+# Vector 采集演示：traefik 主日志 + access 日志(JSON) → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/traefik/$SOURCE_TOKEN
+# 演示要点：file source tail 双文件 + parse_json 解析结构化 access log
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  traefik_access:
+    type: file
+    include:
+      - /var/log/traefik/access.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  traefik_log:
+    type: file
+    include:
+      - /var/log/traefik/traefik.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2}T'
+      condition_pattern: '^\d{4}-\d{2}-\d{2}T'
+      mode: halt_before
+      timeout_ms: 1000
+
+transforms:
+  # access.log 为 JSON 格式（--accesslog.format=json），直接 parse_json
+  parse_access:
+    type: remap
+    inputs: [traefik_access]
+    source: |
+      .log_source = "access"
+      # 行示例: {"StartUTC":"2026-09-03T10:00:00.123Z","ClientAddr":"172.18.0.5:41234","RequestMethod":"GET","RequestPath":"/","DownstreamStatus":200,"Duration":123456,...}
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+        del(.message)
+        # 时间字段优先用请求开始时间
+        ts, ts_err = parse_timestamp(.StartUTC, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else if err != null {
+        log("traefik access parse failed: " + err, level: "warn")
+      }
+
+  # traefik.log 为 zerolog 文本格式：时间 级别 调用位置 消息
+  parse_main:
+    type: remap
+    inputs: [traefik_log]
+    source: |
+      .log_source = "main"
+      # 行示例: 2026-09-03T10:00:00Z INF github.com/traefik/.../service.go:331 > msg="..."
+      # caller 字段可能含空格或缺失（启动 banner 等），故设为可选
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:]+Z?) (?P<level>[A-Z]{3,5})(?: (?P<caller>\S+))? ?(?P<msg>.*)$')
+      if err == null {
+        .level = parsed.level
+        if parsed.caller != "" && parsed.caller != null {
+          .caller = parsed.caller
+        }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("traefik main parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_access, parse_main]
+    path: /var/lib/vector/output/traefik-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_access, parse_main]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_access, parse_main]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

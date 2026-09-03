@@ -1,0 +1,43 @@
+name: vector-collect-mysql
+
+services:
+  # 真实 MySQL：general/slow/error 日志写文件
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: demo
+      TZ: Asia/Shanghai
+    command:
+      - --general-log=1
+      - --general-log-file=/var/log/mysql/general.log
+      - --slow-query-log=1
+      - --slow-query-log-file=/var/log/mysql/slow.log
+      - --log-error=/var/log/mysql/error.log
+    volumes:
+      - ./logs:/var/log/mysql
+
+  # 模拟查询负载，让 general log 持续产生记录
+  client:
+    image: mysql:8.4
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    command: sh -c "sleep 30; while true; do mysql -h mysql -uroot -prootpw -e 'SELECT 1; SHOW DATABASES; SELECT SLEEP(1);' 2>/dev/null; sleep 5; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/mysql:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

@@ -1,0 +1,101 @@
+# ============================================================
+# Vector 采集演示：Redis 日志 + 指标（redis_exporter + prometheus_scrape）→ 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/redis_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file) 与指标 (prometheus_scrape) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  redis_log:
+    type: file
+    include:
+      - /var/log/redis/redis.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  # Vector 无原生 redis 指标 source，经 redis_exporter 暴露 Prometheus 格式后拉取
+  redis_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - "http://redis-exporter:9121/metrics"
+    scrape_interval_secs: 15
+
+transforms:
+  parse_redis:
+    type: remap
+    inputs: [redis_log]
+    source: |
+      .log_source = "redis"
+      parsed, err = parse_regex(.message, r'^(?P<pid>\d+):(?P<role>[MSCxX]) (?P<ts>\d{2} \w{3} \d{4} [\d:.]+) (?P<level>[*.#-]) (?P<msg>.*)$')
+      if err == null {
+        .pid = parsed.pid
+        .role = parsed.role
+        .level = if parsed.level == "*" { "notice" } else if parsed.level == "#" { "warning" } else { "error" }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%d %b %Y %H:%M:%S%.3f")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("redis parse failed: " + err, level: "warn")
+      }
+
+  tag_metrics:
+    type: remap
+    inputs: [redis_metrics]
+    source: |
+      .tags.service = "redis"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_redis]
+    path: /var/lib/vector/output/redis-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/redis-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_redis]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_redis]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

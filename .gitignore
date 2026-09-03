@@ -1,2 +1,3 @@
 secrets/oss-secrets.json
 secrets.json
+vector-collect/.gitignore.bak

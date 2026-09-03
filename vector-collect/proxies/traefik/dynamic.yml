@@ -1,0 +1,11 @@
+# traefik 文件提供者：把所有请求路由到 whoami 后端
+http:
+  routers:
+    demo:
+      rule: "PathPrefix(`/`)"
+      service: whoami
+  services:
+    whoami:
+      loadBalancer:
+        servers:
+          - url: "http://whoami:80"

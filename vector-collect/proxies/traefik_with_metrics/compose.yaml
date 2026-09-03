@@ -1,0 +1,59 @@
+name: vector-collect-traefik-metrics
+
+services:
+  # 真实 traefik：日志写文件 + 内置 Prometheus /metrics (:8080)
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    depends_on:
+      - whoami
+    command:
+      - --log.level=INFO
+      - --log.filepath=/var/log/traefik/traefik.log
+      - --accesslog=true
+      - --accesslog.filepath=/var/log/traefik/access.log
+      - --accesslog.format=json
+      - --metrics.prometheus=true
+      - --entrypoints.web.address=:80
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+    volumes:
+      - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./logs:/var/log/traefik
+
+  whoami:
+    image: traefik/whoami:latest
+    restart: unless-stopped
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+
+  traffic:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - traefik
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: sh -c "while true; do curl -s http://traefik/ >/dev/null; sleep 2; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - traefik
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/traefik:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+      NO_PROXY: "*"
+      no_proxy: "*"
+
+volumes:
+  vector-data:

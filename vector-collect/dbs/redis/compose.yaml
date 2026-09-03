@@ -1,0 +1,34 @@
+name: vector-collect-redis
+
+services:
+  # 真实 Redis：logfile 写文件
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: sh -c "mkdir -p /var/log/redis && exec redis-server --logfile /var/log/redis/redis.log --save '' --appendonly no"
+    volumes:
+      - ./logs:/var/log/redis
+
+  # 模拟读写负载
+  client:
+    image: redis:7-alpine
+    restart: unless-stopped
+    depends_on:
+      - redis
+    command: sh -c "while true; do redis-cli -h redis SET demo:counter $$(date +%s) >/dev/null; redis-cli -h redis GET demo:counter >/dev/null; sleep 3; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - redis
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/redis:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

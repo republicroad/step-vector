@@ -1,0 +1,60 @@
+# ============================================================
+# Vector 采集演示：haproxy 请求日志（syslog/UDP）→ 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/haproxy/$SOURCE_TOKEN
+# 演示要点：syslog source (UDP) + syslog 协议自带解析
+# 说明：Better Stack 官方配置用 file source 读 /var/log/haproxy.log；
+#       容器化部署中 haproxy 走 syslog 输出更常见，故本演示用 syslog source
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  haproxy_syslog:
+    type: syslog
+    address: "0.0.0.0:1514"
+    mode: udp
+
+transforms:
+  normalize:
+    type: remap
+    inputs: [haproxy_syslog]
+    source: |
+      # syslog source 已按 RFC3164/RFC5424 解析出 message/hostname/timestamp/facility/severity
+      # 剩余的 haproxy HTTP 日志体用正则拆字段；保留 syslog 元数据
+      .log_source = "haproxy"
+      # 兼容 tag 未剥离的情况：[haproxy[8]: ]172.18.0.5:41234 [03/Sep/2026:10:00:00.123] ...
+      parsed, err = parse_regex(.message, r'^(?:haproxy\[\d+\]: )?(?P<client_ip_port>\S+) \[(?P<request_date>[^\]]+)\] (?P<event>[\w-]+) (?P<backend>\S+)/(?P<server>\S+) (?P<timings>\S+) (?P<status>\d+) (?P<bytes_read>\d+)(?: (?P<rest>.*))?$')
+      if err == null {
+        . = merge(., parsed)
+        .status = to_int!(parsed.status)
+        .bytes_read = to_int!(parsed.bytes_read)
+      } else {
+        log("haproxy http log parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [normalize]
+    path: /var/lib/vector/output/haproxy-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [normalize]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [normalize]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

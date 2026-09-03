@@ -1,0 +1,64 @@
+# ============================================================
+# Vector 采集演示：Redis 日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/redis/$SOURCE_TOKEN
+# 演示要点：file source + redis 日志格式（pid:role 时间 级别 消息）正则解析
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  redis_log:
+    type: file
+    include:
+      - /var/log/redis/redis.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_redis:
+    type: remap
+    inputs: [redis_log]
+    source: |
+      # 行示例: 12:M 03 Sep 2026 10:00:00.123 * Ready to accept connections tcp
+      # 级别: * = notice(verbose/debug 也走 .), # = warning, - = error
+      parsed, err = parse_regex(.message, r'^(?P<pid>\d+):(?P<role>[MSCxX]) (?P<ts>\d{2} \w{3} \d{4} [\d:.]+) (?P<level>[*.#-]) (?P<msg>.*)$')
+      if err == null {
+        .pid = parsed.pid
+        .role = parsed.role
+        .level = if parsed.level == "*" { "notice" } else if parsed.level == "#" { "warning" } else { "error" }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%d %b %Y %H:%M:%S%.3f")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("redis parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_redis]
+    path: /var/lib/vector/output/redis-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_redis]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_redis]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

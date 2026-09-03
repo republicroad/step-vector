@@ -1,0 +1,155 @@
+# ============================================================
+# Vector 采集演示：MySQL 日志 + 原生 mysql_metrics 指标 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/mysql_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file source) 与指标 (mysql_metrics source) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  mysql_general:
+    type: file
+    include:
+      - /var/log/mysql/general.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  mysql_error:
+    type: file
+    include:
+      - /var/log/mysql/error.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  mysql_slow:
+    type: file
+    include:
+      - /var/log/mysql/slow.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    multiline:
+      start_pattern: '^# Time:'
+      condition_pattern: '^# Time:'
+      mode: halt_before
+      timeout_ms: 1000
+
+  # Vector 无原生 MySQL 指标 source，经 prom/mysqld-exporter 暴露 Prometheus 格式后拉取
+  mysql_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - "http://mysql-exporter:9104/metrics"
+    scrape_interval_secs: 15
+
+transforms:
+  parse_general:
+    type: remap
+    inputs: [mysql_general]
+    source: |
+      .log_source = "general"
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+(?P<thread_id>\d+)\s+(?P<command>\w+)\s*(?P<msg>.*)$')
+      if err == null {
+        .thread_id = parsed.thread_id
+        .command = parsed.command
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("mysql general parse failed: " + err, level: "warn")
+      }
+
+  parse_error:
+    type: remap
+    inputs: [mysql_error]
+    source: |
+      .log_source = "error"
+      parsed, err = parse_regex(.message, r'^(?P<ts>\S+)\s+(?P<thread_id>\d+)\s+\[(?P<level>\w+)\]\s+(?:\[(?P<error_class>\w+)\]\s*)?(?P<msg>.*)$')
+      if err == null {
+        .thread_id = parsed.thread_id
+        .level = parsed.level
+        .error_class = parsed.error_class
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("mysql error parse failed: " + err, level: "warn")
+      }
+
+  parse_slow:
+    type: remap
+    inputs: [mysql_slow]
+    source: |
+      .log_source = "slow"
+      parsed, err = parse_regex(.message, r'# Query_time: (?P<query_time>[\d.]+)\s+Lock_time: (?P<lock_time>[\d.]+)\s+Rows_sent: (?P<rows_sent>\d+)\s+Rows_examined: (?P<rows_examined>\d+)')
+      if err == null {
+        .query_time = to_float(parsed.query_time) ?? null
+        .lock_time = to_float(parsed.lock_time) ?? null
+        .rows_sent = to_int(parsed.rows_sent) ?? null
+        .rows_examined = to_int(parsed.rows_examined) ?? null
+      }
+
+  # 给指标打上服务标识，便于在 Better Stack 中区分来源
+  tag_metrics:
+    type: remap
+    inputs: [mysql_metrics]
+    source: |
+      .tags.service = "mysql"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_general, parse_error, parse_slow]
+    path: /var/lib/vector/output/mysql-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/mysql-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_general, parse_error, parse_slow]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # 日志与指标是两个 sink（官方配置中指标 sink 名为 *_http_metrics_sink）
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_general, parse_error, parse_slow]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

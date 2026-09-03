@@ -1,0 +1,5 @@
+# 采集产物与原始日志（不入库，目录用 .gitkeep 占位）
+**/logs/*
+!**/logs/.gitkeep
+**/output/*
+!**/output/.gitkeep

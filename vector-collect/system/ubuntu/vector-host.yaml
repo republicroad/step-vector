@@ -1,0 +1,70 @@
+# ============================================================
+# 参考配置：Ubuntu 宿主机（非容器）直接部署 Vector 采集系统日志
+# 对应 Better Stack ubuntu 官方配置的真实形态：
+#   journald (systemd 各单元日志) + /var/log/syslog (rsyslog 传统文件)
+# 用法：sudo vector --config vector-host.yaml
+# ============================================================
+
+data_dir: /var/lib/vector/
+
+sources:
+  journal:
+    type: journald
+    # 排除 vector 自身日志，避免自反馈
+    exclude_units:
+      - vector
+    exclude_matches:
+      SYSLOG_IDENTIFIER: ["vector"]
+
+  syslog_file:
+    type: file
+    include:
+      - /var/log/syslog
+      - /var/log/syslog.1
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    ignore_older_secs: 86400
+
+transforms:
+  normalize:
+    type: remap
+    inputs: [journal, syslog_file]
+    source: |
+      # journald 事件自带 _SYSTEMD_UNIT/__REALTIME_TIMESTAMP 等字段；
+      # file 事件是原始 syslog 行，解析头部归一化
+      if .source_type == "file" {
+        parsed, err = parse_regex(.message, r'^(?P<ts>\w{3} +\d{1,2} \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<program>[^\[:]+)(?:\[(?P<pid>\d+)\])?: ?(?P<msg>.*)$')
+        if err == null {
+          .host = parsed.host
+          .program = parsed.program
+          if parsed.pid != "" {
+            .pid = parsed.pid
+          }
+          .message = parsed.msg
+          ts_norm = replace!(parsed.ts, "  ", " 0")
+          ts, ts_err = parse_timestamp(ts_norm, format: "%b %d %H:%M:%S")
+          if ts_err == null {
+            .timestamp = ts
+          }
+        }
+      }
+
+sinks:
+  console:
+    type: console
+    inputs: [normalize]
+    encoding:
+      codec: json
+
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [normalize]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

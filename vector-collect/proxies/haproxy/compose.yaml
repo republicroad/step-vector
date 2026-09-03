@@ -1,0 +1,35 @@
+name: vector-collect-haproxy
+
+services:
+  # 真实 haproxy：HTTP 请求日志通过 syslog (UDP) 发给 vector
+  haproxy:
+    image: haproxy:2.9-alpine
+    restart: unless-stopped
+    depends_on:
+      - vector
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+
+  # 模拟访问流量
+  traffic:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - haproxy
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: sh -c "while true; do curl -s http://haproxy:8080/ >/dev/null; curl -s http://haproxy:8080/demo >/dev/null; sleep 2; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

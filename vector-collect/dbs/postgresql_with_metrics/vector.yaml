@@ -1,0 +1,110 @@
+# ============================================================
+# Vector 采集演示：PostgreSQL 日志 + 原生 postgresql_metrics 指标 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/postgresql_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file) 与指标 (postgresql_metrics) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  postgres_log:
+    type: file
+    include:
+      - /var/log/postgresql/postgresql.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2} '
+      condition_pattern: '^\d{4}-\d{2}-\d{2} '
+      mode: halt_before
+      timeout_ms: 1000
+
+  # Vector 原生 PostgreSQL 指标采集：读取 pg_stat_* / 库表大小等
+  # endpoints 为完整连接串（URL 或 key=value 形式均可）
+  pg_metrics:
+    type: postgresql_metrics
+    endpoints:
+      - "postgresql://demo:demopw@postgres:5432/demo"
+    include_databases: [demo]
+    scrape_interval_secs: 15
+
+transforms:
+  parse_postgres:
+    type: remap
+    inputs: [postgres_log]
+    source: |
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2} [\d:.]+ \w+) \[(?P<pid>\d+)\] (?:(?P<user>\S+)@(?P<database>\S+) )?(?P<level>[A-Z]+):\s*(?P<msg>.*)$')
+      if err == null {
+        .pid = parsed.pid
+        .level = parsed.level
+        if parsed.user != "" {
+          .user = parsed.user
+          .database = parsed.database
+        }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%Y-%m-%d %H:%M:%S%.f %Z")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("postgres parse failed: " + err, level: "warn")
+      }
+
+  tag_metrics:
+    type: remap
+    inputs: [pg_metrics]
+    source: |
+      .tags.service = "postgresql"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_postgres]
+    path: /var/lib/vector/output/postgresql-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/postgresql-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_postgres]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_postgres]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

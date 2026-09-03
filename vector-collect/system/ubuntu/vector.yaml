@@ -1,0 +1,68 @@
+# ============================================================
+# Vector 采集演示：Ubuntu 系统日志 (syslog) → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/ubuntu/$SOURCE_TOKEN?docker=false
+# 演示要点：file source + syslog 格式正则解析
+# 生产环境：journald source + /var/log/syslog file source，见 vector-host.yaml
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  syslog:
+    type: file
+    include:
+      - /var/log/syslog.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_syslog:
+    type: remap
+    inputs: [syslog]
+    source: |
+      # 行示例: Sep  3 10:00:01 ubuntu systemd[1]: Started nginx.service.
+      # kernel 行无 pid: Sep  3 10:00:02 ubuntu kernel:[123456.789] eth0: Link is Up
+      parsed, err = parse_regex(.message, r'^(?P<ts>\w{3} +\d{1,2} \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<program>[^\[:]+)(?:\[(?P<pid>\d+)\])?: ?(?P<msg>.*)$')
+      if err == null {
+        .host = parsed.host
+        .program = parsed.program
+        if parsed.pid != "" {
+          .pid = parsed.pid
+        }
+        .message = parsed.msg
+        ts_norm = replace!(parsed.ts, "  ", " 0")
+        ts, ts_err = parse_timestamp(ts_norm, format: "%b %d %H:%M:%S")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("syslog parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_syslog]
+    path: /var/lib/vector/output/ubuntu-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_syslog]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_syslog]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

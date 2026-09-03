@@ -1,0 +1,37 @@
+name: vector-collect-nginx
+
+services:
+  # 真实 nginx：日志写入文件（bind mount 覆盖官方镜像的 /dev/stdout 软链）
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    volumes:
+      - ./logs:/var/log/nginx
+
+  # 模拟访问流量，持续产生 access/error 日志
+  traffic:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    environment:
+      # podman 会注入宿主代理变量，容器间 HTTP 必须绕过
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: sh -c "while true; do curl -s http://nginx/ >/dev/null; curl -s http://nginx/not-found >/dev/null; curl -s -A 'demo-bot/1.0' -e 'http://example.com/' http://nginx/demo >/dev/null; sleep 2; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/nginx:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

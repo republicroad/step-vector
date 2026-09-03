@@ -1,0 +1,54 @@
+name: vector-collect-postgresql-metrics
+
+services:
+  # 真实 PostgreSQL：logging_collector 把日志写文件
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demopw
+      POSTGRES_DB: demo
+      # postgresql_metrics source 以 host 形式连接（无凭据参数），宿主机侧放行 trust
+      POSTGRES_HOST_AUTH_METHOD: trust
+      TZ: Asia/Shanghai
+    command:
+      - postgres
+      - -c
+      - logging_collector=on
+      - -c
+      - log_directory=/var/log/postgresql
+      - -c
+      - log_filename=postgresql.log
+      - -c
+      - log_statement=all
+      - -c
+      - log_min_duration_statement=0
+    volumes:
+      - ./logs:/var/log/postgresql
+
+  # 模拟查询负载
+  client:
+    image: postgres:16
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      PGPASSWORD: demopw
+    command: sh -c "sleep 30; while true; do psql -h postgres -U demo -d demo -c 'SELECT 1;' -c 'SELECT pg_sleep(1);' 2>/dev/null; sleep 5; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/postgresql:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

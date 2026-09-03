@@ -1,0 +1,90 @@
+# ============================================================
+# Vector 采集演示：nginx access/error 日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/nginx/$SOURCE_TOKEN
+# 演示要点：file source tail + parse_nginx_log!(combined) 原生解析函数
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  nginx_access:
+    type: file
+    include:
+      - /var/log/nginx/access.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  nginx_error:
+    type: file
+    include:
+      - /var/log/nginx/error.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  # access.log 为 nginx combined 格式，用 Vector 原生解析函数拆字段
+  parse_access:
+    type: remap
+    inputs: [nginx_access]
+    source: |
+      .log_source = "access"
+      # 行示例: 172.18.0.5 - - [03/Sep/2026:10:00:00 +0000] "GET / HTTP/1.1" 200 615 "-" "curl/8.5.0"
+      parsed, err = parse_nginx_log(.message, "combined")
+      if err == null {
+        . = merge!(., parsed)
+        .timestamp = parse_timestamp!(.timestamp, format: "%d/%b/%Y:%H:%M:%S %z")
+      } else {
+        log("nginx access parse failed: " + err, level: "warn")
+      }
+
+  # error.log 为 nginx 自定义格式，用正则提取
+  parse_error:
+    type: remap
+    inputs: [nginx_error]
+    source: |
+      .log_source = "error"
+      # 行示例: 2026/09/03 10:00:00 [error] 29#29: *5 open() "..." failed (2: No such file or directory), client: 172.18.0.5, server: localhost, request: "GET /not-found HTTP/1.1", host: "nginx"
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2}) \[(?P<level>\w+)\] (?P<pid>\d+)#(?P<tid>\d+): \*(?P<cid>\d+) (?P<msg>.*)$')
+      if err == null {
+        .level = parsed.level
+        .pid = parsed.pid
+        .thread_id = parsed.tid
+        .connection_id = parsed.cid
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%Y/%m/%d %H:%M:%S")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("nginx error parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_access, parse_error]
+    path: /var/lib/vector/output/nginx-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_access, parse_error]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # 取消注释并设置 SOURCE_TOKEN / INGESTING_HOST 环境变量即可推送 Better Stack
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_access, parse_error]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

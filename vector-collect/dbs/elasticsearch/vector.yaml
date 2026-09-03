@@ -1,0 +1,92 @@
+# ============================================================
+# Vector 采集演示：Elasticsearch 服务端日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/elasticsearch/$SOURCE_TOKEN
+# 演示要点：file source + 兼容 ES 8 JSON 日志 / 7.x 文本日志的弹性解析
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  es_log:
+    type: file
+    include:
+      - /usr/share/elasticsearch/logs/docker-cluster.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_es:
+    type: remap
+    inputs: [es_log]
+    source: |
+      # ES 8.x JSON 行字段: @timestamp / log.level / log.logger / cluster.name / node.name / message
+      # {"@timestamp":"2026-09-03T11:55:05.396Z","log.level":"INFO","log.logger":"o.e.n.Node","cluster.name":"docker-cluster","node.name":"abc","message":"..."}
+      # ES 7.x 文本行: [2026-09-03T10:00:00,123Z][INFO ][o.e.n.Node] [node-1] message...
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        .log_source = "server"
+        .es_type = parsed.type
+        .level = parsed."log.level"
+        if .level == null {
+          .level = parsed.level
+        }
+        .component = parsed.component
+        if .component == null {
+          .component = parsed."log.logger"
+        }
+        .cluster_name = parsed."cluster.name"
+        .node_name = parsed."node.name"
+        .message = parsed.message
+        ts_raw = parsed."@timestamp"
+        if ts_raw == null {
+          ts_raw = parsed.timestamp
+        }
+        ts, ts_err = parse_timestamp(ts_raw, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        # 7.x 文本格式兜底
+        parsed2, err2 = parse_regex(.message, r'^\[(?P<ts>[^\]]+)\]\[(?P<level>[A-Z]+)\s*\]\[(?P<component>[^\]]+)\]\s*(?:\[(?P<node>[^\]]+)\]\s*)?(?P<msg>.*)$')
+        if err2 == null {
+          .log_source = "server"
+          .level = parsed2.level
+          .component = parsed2.component
+          .node_name = parsed2.node
+          .message = parsed2.msg
+          ts, ts_err = parse_timestamp(parsed2.ts, format: "%Y-%m-%dT%H:%M:%S,%3N%Z")
+          if ts_err == null {
+            .timestamp = ts
+          }
+        } else {
+          log("elasticsearch parse failed: " + err2, level: "warn")
+        }
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_es]
+    path: /var/lib/vector/output/elasticsearch-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_es]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_es]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

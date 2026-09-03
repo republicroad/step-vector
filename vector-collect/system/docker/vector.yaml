@@ -1,0 +1,52 @@
+# ============================================================
+# Vector 采集演示：Docker 容器日志 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/docker/$SOURCE_TOKEN
+# 演示要点：docker_logs source 直连 Docker API 采集全部容器 stdout/stderr
+# 注意：故意不配 console sink——console 输出也是容器日志，会被 docker_logs
+#       重新采回造成自反馈循环；本地演示用 file sink 验证
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  docker_logs:
+    type: docker_logs
+    # 排除自身与辅助容器（值为容器 ID 前缀匹配；用 include_containers 亦可按前缀圈定）
+    exclude_containers:
+      - vector
+    auto_partial_merge: true
+
+transforms:
+  parse_app1:
+    type: remap
+    inputs: [docker_logs]
+    source: |
+      # docker_logs 自带元数据: container_name/container_id/image/host/labels...
+      # app1 输出 JSON 行，尝试解析；app2 纯文本保持原样
+      if .container_name == "app1" {
+        parsed, err = parse_json(.message)
+        if err == null && is_object(parsed) {
+          . = merge!(., parsed)
+        }
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_app1]
+    path: /var/lib/vector/output/docker-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_app1]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

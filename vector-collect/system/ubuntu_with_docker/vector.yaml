@@ -1,0 +1,88 @@
+# ============================================================
+# Vector 采集演示：Ubuntu 系统日志 + Docker 容器日志 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/ubuntu/$SOURCE_TOKEN?docker=true
+# 演示要点：file source (syslog) + docker_logs source 双 source 并存
+#           (= 官方 ubuntu 配置 docker=true 变体的容器化演示)
+# 注意：docker_logs 事件只进 file sink（console 输出也是容器日志，会造成自反馈）
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  syslog:
+    type: file
+    include:
+      - /var/log/syslog.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  docker_logs:
+    type: docker_logs
+    exclude_containers:
+      - vector
+    auto_partial_merge: true
+
+transforms:
+  parse_syslog:
+    type: remap
+    inputs: [syslog]
+    source: |
+      .log_source = "syslog"
+      parsed, err = parse_regex(.message, r'^(?P<ts>\w{3} +\d{1,2} \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<program>[^\[:]+)(?:\[(?P<pid>\d+)\])?: ?(?P<msg>.*)$')
+      if err == null {
+        .host = parsed.host
+        .program = parsed.program
+        if parsed.pid != "" {
+          .pid = parsed.pid
+        }
+        .message = parsed.msg
+        ts_norm = replace!(parsed.ts, "  ", " 0")
+        ts, ts_err = parse_timestamp(ts_norm, format: "%b %d %H:%M:%S")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("syslog parse failed: " + err, level: "warn")
+      }
+
+  tag_docker:
+    type: remap
+    inputs: [docker_logs]
+    source: |
+      # docker_logs 自带 container_name/image/host 等元数据，无需解析
+      .log_source = "docker"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_syslog]
+    path: /var/lib/vector/output/ubuntu-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_docker_file:
+    type: file
+    inputs: [tag_docker]
+    path: /var/lib/vector/output/ubuntu-docker-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_syslog]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_syslog, tag_docker]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

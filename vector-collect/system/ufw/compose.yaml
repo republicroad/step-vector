@@ -1,0 +1,30 @@
+name: vector-collect-ufw
+
+services:
+  # 模拟器：生成 UFW 内核日志样例（生产环境直接读宿主机 /var/log/ufw.log 或 syslog）
+  log-gen:
+    image: python:3-alpine
+    restart: unless-stopped
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+      - ./logs:/logs
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+    command: python /app/gen-log.py
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - log-gen
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

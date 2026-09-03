@@ -1,0 +1,102 @@
+# ============================================================
+# Vector 采集演示：RabbitMQ 日志 + 内置 Prometheus 指标 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/rabbitmq_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file) 与指标 (prometheus_scrape) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  rabbitmq_log:
+    type: file
+    include:
+      - /var/log/rabbitmq/rabbitmq.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  # rabbitmq_prometheus 插件默认启用，:15692/metrics 直接暴露
+  rabbitmq_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - "http://rabbitmq:15692/metrics"
+    scrape_interval_secs: 15
+
+transforms:
+  parse_rabbitmq:
+    type: remap
+    inputs: [rabbitmq_log]
+    source: |
+      .log_source = "rabbitmq"
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+[+-]\d{2}:\d{2}) \[(?P<level>\w+)\](?: <(?P<pid>[\d.]+)>)? ?(?P<msg>.*)$')
+      if err == null {
+        .level = parsed.level
+        if parsed.pid != "" {
+          .erlang_pid = parsed.pid
+        }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("rabbitmq parse failed: " + err, level: "warn")
+      }
+
+  tag_metrics:
+    type: remap
+    inputs: [rabbitmq_metrics]
+    source: |
+      .tags.service = "rabbitmq"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_rabbitmq]
+    path: /var/lib/vector/output/rabbitmq-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/rabbitmq-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_rabbitmq]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_rabbitmq]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

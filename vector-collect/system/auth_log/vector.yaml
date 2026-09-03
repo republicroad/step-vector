@@ -1,0 +1,104 @@
+# ============================================================
+# Vector 采集演示：auth.log (sshd/sudo/cron) → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/auth_log/$SOURCE_TOKEN
+# 演示要点：file source + syslog 头部正则 + 按事件类型二次解析(VRL if/else 分支)
+# 生产环境：include 改为宿主机 /var/log/auth.log
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  auth_log:
+    type: file
+    include:
+      - /var/log/auth.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_auth:
+    type: remap
+    inputs: [auth_log]
+    source: |
+      # syslog 行: Sep  3 10:00:01 ubuntu sshd[1234]: Failed password for ...
+      parsed, err = parse_regex(.message, r'^(?P<ts>\w{3} +\d{1,2} \d{2}:\d{2}:\d{2}) (?P<host>\S+) (?P<program>[^\[:]+)(?:\[(?P<pid>\d+)\])?: ?(?P<msg>.*)$')
+      if err != null {
+        # 解析失败丢弃该事件（VRL 中用 abort，非 return）
+        log("auth syslog header parse failed: " + err, level: "warn")
+        abort
+      }
+      .host = parsed.host
+      .program = parsed.program
+      if parsed.pid != "" {
+        .pid = parsed.pid
+      }
+      msg = parsed.msg
+      .message = msg
+
+      # 时间戳：%b + 空格补位日；统一补零后用 %b %d 解析
+      ts_norm = replace!(parsed.ts, "  ", " 0")
+      ts, ts_err = parse_timestamp(ts_norm, format: "%b %d %H:%M:%S")
+      if ts_err == null {
+        .timestamp = ts
+      }
+
+      # 按事件类型二次解析
+      m1, e1 = parse_regex(msg, r'^(Failed password|Invalid user) (?:for )?(?:invalid user )?(?P<user>\S+) from (?P<src_ip>\S+) port (?P<src_port>\d+)')
+      m2, e2 = parse_regex(msg, r'^Accepted (?:password|publickey) for (?P<user>\S+) from (?P<src_ip>\S+) port (?P<src_port>\d+)')
+      m3, e3 = parse_regex(msg, r'^pam_unix\(\w+:session\): session (?P<state>opened|closed) for user (?P<user>\S+)')
+      m4, e4 = parse_regex(msg, r'^(?P<user>\S+) : TTY=\S+ ; PWD=\S+ ; USER=(?P<run_as>\S+) ; COMMAND=(?P<command>.*)$')
+      m5, e5 = parse_regex(msg, r'^\((?P<user>\S+)\) CMD \((?P<command>.*)\)$')
+
+      if e1 == null {
+        .event = "auth_failure"
+        .user = m1.user
+        .src_ip = m1.src_ip
+        .src_port = m1.src_port
+      } else if e2 == null {
+        .event = "auth_success"
+        .user = m2.user
+        .src_ip = m2.src_ip
+        .src_port = m2.src_port
+      } else if e3 == null {
+        .event = "session_" + string!(m3.state)
+        .user = m3.user
+      } else if e4 == null {
+        .event = "sudo"
+        .user = m4.user
+        .run_as = m4.run_as
+        .command = m4.command
+      } else if e5 == null {
+        .event = "cron"
+        .user = m5.user
+        .command = m5.command
+      } else {
+        .event = "other"
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_auth]
+    path: /var/lib/vector/output/auth-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_auth]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_auth]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

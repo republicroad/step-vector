@@ -1,0 +1,58 @@
+name: vector-collect-traefik
+
+services:
+  # 真实 traefik：主日志 + access 日志(JSON) 写入文件
+  traefik:
+    image: traefik:v3.1
+    restart: unless-stopped
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    depends_on:
+      - whoami
+    command:
+      - --log.level=INFO
+      - --log.filepath=/var/log/traefik/traefik.log
+      - --accesslog=true
+      - --accesslog.filepath=/var/log/traefik/access.log
+      - --accesslog.format=json
+      - --entrypoints.web.address=:80
+      - --providers.file.filename=/etc/traefik/dynamic.yml
+    volumes:
+      - ./dynamic.yml:/etc/traefik/dynamic.yml:ro
+      - ./logs:/var/log/traefik
+
+  # 后端服务：traefik 路由到 whoami
+  whoami:
+    image: traefik/whoami:latest
+    restart: unless-stopped
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+
+  # 模拟访问流量
+  traffic:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - traefik
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: sh -c "while true; do curl -s http://traefik/ >/dev/null; curl -s http://traefik/demo >/dev/null; sleep 2; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - traefik
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/traefik:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

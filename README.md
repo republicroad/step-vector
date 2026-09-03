@@ -34,6 +34,12 @@ step-vector/
 ├── vector2openobserve/                # TODO: OpenObserve 示例
 ├── vector2doris/                      # TODO: Apache Doris 示例
 ├── vector2clickhouse/                 # TODO: ClickHouse 示例
+├── vector-collect/                    # Better Stack 全套采集演示（source 侧）
+│   ├── dbs/                           #   mysql/postgresql/redis/mongodb/elasticsearch (×2 含指标)
+│   ├── queues/                        #   rabbitmq (×2 含指标)
+│   ├── webservers/                    #   nginx / apache
+│   ├── proxies/                       #   haproxy / traefik (×2 含指标)
+│   └── system/                        #   auth_log/docker/kubernetes/ubuntu×2/ufw
 └── tmp/                               # 临时实验 (metrics、logging 等)
 ```
 
@@ -43,6 +49,26 @@ step-vector/
 |------|------|------|------|
 | 阿里云 OSS | `vector2oss/` | JSON + Parquet | S3 兼容 API，Hive 分区 |
 | RustFS | `vector2rustfs/` | JSON + Parquet | 本地 S3 兼容存储，Hive 分区 |
+| 本地文件 | `vector-collect/**` | JSON lines | 22 个 Better Stack 全套采集演示，见下 |
+
+## 采集示例（vector-collect，source 侧）
+
+对应 Better Stack [Vector 文档 Available configs](https://betterstack.com/docs/logs/vector/#available-configs) 全部配置，每目录为独立端到端演示：容器化真实服务产生日志 → Vector 采集解析 → 本地文件落地（离线可跑）。详见 [`vector-collect/README.md`](vector-collect/README.md)。
+
+| 分类 | 示例 | Vector source |
+|------|------|---------------|
+| DBs | mysql / mysql_with_metrics | `file` (+`mysql_metrics`) |
+| DBs | postgresql / postgresql_with_metrics | `file` (+`postgresql_metrics`) |
+| DBs | mongodb | `file` + `parse_json` |
+| DBs | redis / redis_with_metrics | `file` (+`prometheus_scrape`) |
+| DBs | elasticsearch / elasticsearch_with_metrics | `file` (+`prometheus_scrape`) |
+| Queues | rabbitmq / rabbitmq_with_metrics | `file` (+`prometheus_scrape`) |
+| Webservers | nginx / apache | `file` + `parse_nginx_log!` / `parse_apache_log!` |
+| Proxies | haproxy | `syslog` (UDP) |
+| Proxies | traefik / traefik_with_metrics | `file` + `parse_json` (+`prometheus_scrape`) |
+| System | auth_log / ufw / ubuntu / ubuntu_with_docker | `file` (+`docker_logs`) |
+| System | docker | `docker_logs` |
+| System | kubernetes | `kubernetes_logs` (+`k8s/` DaemonSet 清单) |
 
 ## 公共模式
 
@@ -152,8 +178,12 @@ duckdb -f duckdb/queries.sql
 
 ### 待添加的 Source 示例
 
-- [ ] **syslog** - 读取 syslog 数据
-- [ ] **journald** - 读取 systemd journal
+- [x] **syslog** - 读取 syslog 数据（`vector-collect/proxies/haproxy/`）
+- [x] **journald** - 读取 systemd journal（`vector-collect/system/ubuntu/vector-host.yaml`）
+- [x] **kubernetes_logs** - K8s Pod 日志（`vector-collect/system/kubernetes/`）
+- [x] **docker_logs** - 容器日志（`vector-collect/system/docker/`）
+- [x] **prometheus_scrape** - 指标抓取（`vector-collect/**/*_with_metrics/`）
+- [x] **postgresql_metrics** - PostgreSQL 指标（`vector-collect/dbs/postgresql_with_metrics/`）
 - [ ] **kafka** - 消费 Kafka topic
 - [ ] **stdin** - 标准输入
 

@@ -1,0 +1,49 @@
+name: vector-collect-ubuntu-docker
+
+services:
+  # 模拟器：生成 syslog 样例行（对应官方 ubuntu?docker=true 的系统日志部分）
+  log-gen:
+    image: python:3-alpine
+    restart: unless-stopped
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+      - ./logs:/logs
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+    command: python /app/gen-log.py
+
+  # 模拟宿主机上的容器工作负载（docker_logs source 采集对象）
+  # 注意：command 里不要用内嵌转义引号（podman-compose 的 shlex 解析会崩）
+  app:
+    image: busybox:latest
+    restart: unless-stopped
+    command: sh -c 'while true; do echo workload-log-line; sleep 3; done'
+    # podman 默认 journald 驱动的 Docker 兼容日志 API 读不到内容，显式 json-file
+    logging:
+      driver: json-file
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    # docker.sock 属主通常为 root，vector 镜像默认 uid 1000 无连接权限，需以 root 运行
+    user: "0"
+    depends_on:
+      - log-gen
+      - app
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock:ro
+    environment:
+      TZ: Asia/Shanghai
+      # podman 注入的代理变量会劫持 docker socket 的 UDS 请求（Connection refused），必须清空
+      HTTP_PROXY: ""
+      http_proxy: ""
+      HTTPS_PROXY: ""
+      https_proxy: ""
+
+volumes:
+  vector-data:

@@ -1,0 +1,37 @@
+name: vector-collect-apache
+
+services:
+  # 真实 httpd：自定义最小配置，combined 格式日志写文件
+  httpd:
+    image: httpd:2.4-alpine
+    restart: unless-stopped
+    volumes:
+      - ./httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - ./logs:/usr/local/apache2/logs
+
+  # 模拟访问流量
+  traffic:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - httpd
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: sh -c "while true; do curl -s http://httpd/ >/dev/null; curl -s http://httpd/missing >/dev/null; curl -s -A 'demo-bot/1.0' http://httpd/index.html >/dev/null; sleep 2; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - httpd
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/usr/local/apache2/logs:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

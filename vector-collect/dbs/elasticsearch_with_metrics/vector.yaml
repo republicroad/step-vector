@@ -1,0 +1,126 @@
+# ============================================================
+# Vector 采集演示：Elasticsearch 日志 + 指标（exporter + prometheus_scrape）→ 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/elasticsearch_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file) 与指标 (prometheus_scrape) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  es_log:
+    type: file
+    include:
+      - /usr/share/elasticsearch/logs/docker-cluster.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  # Vector 无原生 ES 指标 source，经 justwatch/elasticsearch_exporter 暴露 Prometheus 格式后拉取
+  es_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - "http://es-exporter:9114/metrics"
+    scrape_interval_secs: 15
+
+transforms:
+  parse_es:
+    type: remap
+    inputs: [es_log]
+    source: |
+      .log_source = "elasticsearch"
+      # ES 8.x JSON: @timestamp / log.level / log.logger；7.x 文本兜底
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        .es_type = parsed.type
+        .level = parsed."log.level"
+        if .level == null {
+          .level = parsed.level
+        }
+        .component = parsed.component
+        if .component == null {
+          .component = parsed."log.logger"
+        }
+        .cluster_name = parsed."cluster.name"
+        .node_name = parsed."node.name"
+        .message = parsed.message
+        ts_raw = parsed."@timestamp"
+        if ts_raw == null {
+          ts_raw = parsed.timestamp
+        }
+        ts, ts_err = parse_timestamp(ts_raw, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        parsed2, err2 = parse_regex(.message, r'^\[(?P<ts>[^\]]+)\]\[(?P<level>[A-Z]+)\s*\]\[(?P<component>[^\]]+)\]\s*(?:\[(?P<node>[^\]]+)\]\s*)?(?P<msg>.*)$')
+        if err2 == null {
+          .level = parsed2.level
+          .component = parsed2.component
+          .node_name = parsed2.node
+          .message = parsed2.msg
+          ts, ts_err = parse_timestamp(parsed2.ts, format: "%Y-%m-%dT%H:%M:%S,%3N%Z")
+          if ts_err == null {
+            .timestamp = ts
+          }
+        } else {
+          log("elasticsearch parse failed: " + err2, level: "warn")
+        }
+      }
+
+  tag_metrics:
+    type: remap
+    inputs: [es_metrics]
+    source: |
+      .tags.service = "elasticsearch"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_es]
+    path: /var/lib/vector/output/elasticsearch-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/elasticsearch-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_es]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_es]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

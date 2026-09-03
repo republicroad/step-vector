@@ -1,0 +1,75 @@
+# ============================================================
+# Vector 采集演示：UFW 防火墙日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/ufw/$SOURCE_TOKEN
+# 演示要点：file source + syslog 头 + iptables 出入站字段 (k=v) 正则解析
+# 生产环境：include 改为 /var/log/ufw.log 或 /var/log/syslog (kernel facility)
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  ufw_log:
+    type: file
+    include:
+      - /var/log/ufw.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_ufw:
+    type: remap
+    inputs: [ufw_log]
+    source: |
+      # 行示例: Sep  3 10:00:01 ubuntu kernel:[123456.789012] [UFW BLOCK] IN=eth0 OUT= MAC=... SRC=203.0.113.5 DST=10.0.0.2 LEN=40 ... PROTO=TCP SPT=54321 DPT=23 WINDOW=1024 SYN
+      # 一次正则解析 syslog 头 + [UFW 动作] + iptables k=v 字段（SPT/DPT 仅 TCP/UDP 有，可选）
+      parsed, err = parse_regex(.message, r'^(?P<ts>\w{3} +\d{1,2} \d{2}:\d{2}:\d{2}) (?P<host>\S+) kernel:\[[\d.]+\] \[UFW (?P<action>[A-Z]+)\] IN=(?P<in_iface>\S*) OUT=(?P<out_iface>\S*).*?SRC=(?P<src_ip>\S*) DST=(?P<dst_ip>\S*).*?PROTO=(?P<proto>\S*)(?: SPT=(?P<src_port>\d*))?(?: DPT=(?P<dst_port>\d*))?')
+      if err != null {
+        # 解析失败丢弃该事件（VRL 中用 abort，非 return）
+        log("ufw parse failed: " + err, level: "warn")
+        abort
+      }
+      .host = parsed.host
+      .event = "firewall_" + downcase!(parsed.action)
+      .action = downcase!(parsed.action)
+      .in_iface = parsed.in_iface
+      .out_iface = parsed.out_iface
+      .src_ip = parsed.src_ip
+      .dst_ip = parsed.dst_ip
+      .proto = downcase(parsed.proto) ?? null
+      if parsed.dst_port != "" && parsed.dst_port != null {
+        .dst_port = to_int!(parsed.dst_port)
+      }
+
+      ts_norm = replace!(parsed.ts, "  ", " 0")
+      ts, ts_err = parse_timestamp(ts_norm, format: "%b %d %H:%M:%S")
+      if ts_err == null {
+        .timestamp = ts
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_ufw]
+    path: /var/lib/vector/output/ufw-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_ufw]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_ufw]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

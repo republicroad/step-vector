@@ -1,0 +1,135 @@
+# ============================================================
+# Vector 采集演示：traefik 日志 + 内置 Prometheus 指标 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/traefik_with_metrics/$SOURCE_TOKEN
+# 演示要点：日志 (file + parse_json) 与指标 (prometheus_scrape) 双 source 并存
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  traefik_access:
+    type: file
+    include:
+      - /var/log/traefik/access.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  traefik_log:
+    type: file
+    include:
+      - /var/log/traefik/traefik.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    multiline:
+      start_pattern: '^\d{4}-\d{2}-\d{2}T'
+      condition_pattern: '^\d{4}-\d{2}-\d{2}T'
+      mode: halt_before
+      timeout_ms: 1000
+
+  # traefik 内置 Prometheus 端点 (--metrics.prometheus)，无需额外 exporter
+  traefik_metrics:
+    type: prometheus_scrape
+    endpoints:
+      - "http://traefik:8080/metrics"
+    scrape_interval_secs: 15
+
+transforms:
+  parse_access:
+    type: remap
+    inputs: [traefik_access]
+    source: |
+      .log_source = "access"
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+        del(.message)
+        ts, ts_err = parse_timestamp(.StartUTC, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else if err != null {
+        log("traefik access parse failed: " + err, level: "warn")
+      }
+
+  parse_main:
+    type: remap
+    inputs: [traefik_log]
+    source: |
+      .log_source = "main"
+      # caller 字段可能含空格或缺失（启动 banner 等），故设为可选
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:]+Z?) (?P<level>[A-Z]{3,5})(?: (?P<caller>\S+))? ?(?P<msg>.*)$')
+      if err == null {
+        .level = parsed.level
+        if parsed.caller != "" && parsed.caller != null {
+          .caller = parsed.caller
+        }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("traefik main parse failed: " + err, level: "warn")
+      }
+
+  # 给指标打上服务标识，便于在 Better Stack 中区分来源
+  tag_metrics:
+    type: remap
+    inputs: [traefik_metrics]
+    source: |
+      .tags.service = "traefik"
+      .tags.namespace = "vector-collect"
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_access, parse_main]
+    path: /var/lib/vector/output/traefik-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  local_metrics_file:
+    type: file
+    inputs: [tag_metrics]
+    path: /var/lib/vector/output/traefik-metrics-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_access, parse_main]
+    encoding:
+      codec: json
+
+  console_metrics:
+    type: console
+    inputs: [tag_metrics]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # 注意：Better Stack 的日志与指标是两个 sink（*_http_metrics_sink）
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_access, parse_main]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"
+  # better_stack_metrics:
+  #   type: http
+  #   method: post
+  #   inputs: [tag_metrics]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

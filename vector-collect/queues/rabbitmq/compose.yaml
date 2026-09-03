@@ -1,0 +1,42 @@
+name: vector-collect-rabbitmq
+
+services:
+  # 真实 RabbitMQ：日志写文件（RABBITMQ_LOGS 指定路径）
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    restart: unless-stopped
+    environment:
+      RABBITMQ_LOGS: /var/log/rabbitmq/rabbitmq.log
+      TZ: Asia/Shanghai
+    volumes:
+      - ./logs:/var/log/rabbitmq
+
+  # 模拟管理操作负载（声明/删除队列，产生连接与 channel 日志）
+  client:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: >-
+      sh -c "sleep 60; while true; do curl -s -u guest:guest -H 'content-type: application/json'
+      -X PUT 'http://rabbitmq:15672/api/queues/%2F/demo' -d '{\"auto_delete\":true}' >/dev/null;
+      curl -s -u guest:guest -X DELETE 'http://rabbitmq:15672/api/queues/%2F/demo' >/dev/null; sleep 5; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - rabbitmq
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/rabbitmq:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

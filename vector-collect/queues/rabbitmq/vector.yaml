@@ -1,0 +1,65 @@
+# ============================================================
+# Vector 采集演示：RabbitMQ 日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/rabbitmq/$SOURCE_TOKEN
+# 演示要点：file source + Erlang 风格时间戳/级别解析
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  rabbitmq_log:
+    type: file
+    include:
+      - /var/log/rabbitmq/rabbitmq.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+transforms:
+  parse_rabbitmq:
+    type: remap
+    inputs: [rabbitmq_log]
+    source: |
+      # 行示例: 2026-09-03T10:00:00.123456+00:00 [info] <0.1234.0> accepting AMQP connection <0.1298.0> (172.18.0.5:41234 -> 172.18.0.3:5672)
+      # 部分行无 pid：2026-09-03T10:00:00.123456+00:00 [info] Manager regulated...
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+[+-]\d{2}:\d{2}) \[(?P<level>\w+)\](?: <(?P<pid>[\d.]+)>)? ?(?P<msg>.*)$')
+      if err == null {
+        .level = parsed.level
+        if parsed.pid != "" {
+          .erlang_pid = parsed.pid
+        }
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("rabbitmq parse failed: " + err, level: "warn")
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_rabbitmq]
+    path: /var/lib/vector/output/rabbitmq-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_rabbitmq]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_rabbitmq]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

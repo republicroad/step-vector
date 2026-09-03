@@ -1,0 +1,121 @@
+# ============================================================
+# Vector 采集演示：MySQL general/slow/error 日志 → 解析 → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/mysql/$SOURCE_TOKEN
+# 演示要点：一个 file source 组 tail 三种日志 + 各自 VRL 正则解析
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  mysql_general:
+    type: file
+    include:
+      - /var/log/mysql/general.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  mysql_error:
+    type: file
+    include:
+      - /var/log/mysql/error.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+
+  mysql_slow:
+    type: file
+    include:
+      - /var/log/mysql/slow.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    multiline:
+      start_pattern: '^# Time:'
+      condition_pattern: '^# Time:'
+      mode: halt_before
+      timeout_ms: 1000
+
+transforms:
+  # general log：时间 线程id 命令 内容
+  parse_general:
+    type: remap
+    inputs: [mysql_general]
+    source: |
+      .log_source = "general"
+      # 行示例: 2026-09-03T10:00:00.123456Z	    12 Connect	root@localhost on demo using TCP/IP
+      parsed, err = parse_regex(.message, r'^(?P<ts>\d{4}-\d{2}-\d{2}T[\d:.]+Z)\s+(?P<thread_id>\d+)\s+(?P<command>\w+)\s*(?P<msg>.*)$')
+      if err == null {
+        .thread_id = parsed.thread_id
+        .command = parsed.command
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("mysql general parse failed: " + err, level: "warn")
+      }
+
+  # error log：时间 线程 [级别] [错误类] 消息
+  parse_error:
+    type: remap
+    inputs: [mysql_error]
+    source: |
+      .log_source = "error"
+      # 行示例: 2026-09-03T10:00:01.234567Z 0 [System] [MY-010116] [Server] /usr/sbin/mysqld (mysqld 8.4.0) starting as process 1
+      parsed, err = parse_regex(.message, r'^(?P<ts>\S+)\s+(?P<thread_id>\d+)\s+\[(?P<level>\w+)\]\s+(?:\[(?P<error_class>\w+)\]\s*)?(?P<msg>.*)$')
+      if err == null {
+        .thread_id = parsed.thread_id
+        .level = parsed.level
+        .error_class = parsed.error_class
+        .message = parsed.msg
+        ts, ts_err = parse_timestamp(parsed.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      } else {
+        log("mysql error parse failed: " + err, level: "warn")
+      }
+
+  # slow log：多行合并后提取 Query_time 等统计头
+  parse_slow:
+    type: remap
+    inputs: [mysql_slow]
+    source: |
+      .log_source = "slow"
+      # 行示例: # Query_time: 1.000123  Lock_time: 0.000000 Rows_sent: 1 Rows_examined: 0
+      parsed, err = parse_regex(.message, r'# Query_time: (?P<query_time>[\d.]+)\s+Lock_time: (?P<lock_time>[\d.]+)\s+Rows_sent: (?P<rows_sent>\d+)\s+Rows_examined: (?P<rows_examined>\d+)')
+      if err == null {
+        .query_time = to_float(parsed.query_time) ?? null
+        .lock_time = to_float(parsed.lock_time) ?? null
+        .rows_sent = to_int(parsed.rows_sent) ?? null
+        .rows_examined = to_int(parsed.rows_examined) ?? null
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [parse_general, parse_error, parse_slow]
+    path: /var/lib/vector/output/mysql-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [parse_general, parse_error, parse_slow]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [parse_general, parse_error, parse_slow]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

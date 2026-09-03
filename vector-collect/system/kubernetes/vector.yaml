@@ -1,0 +1,83 @@
+# ============================================================
+# Vector 采集演示：Kubernetes Pod 日志 (/var/log/pods, CRI 格式) → 本地文件
+# 对应 Better Stack config: https://telemetry.betterstack.com/vector-yaml/kubernetes/$SOURCE_TOKEN
+#
+# 重要：kubernetes_logs source 强依赖 K8s API server（启动检查 + pod 元数据门控），
+#       集群外无法运行。本模拟用 file source 复刻它的核心逻辑：
+#         1. CRI 头剥离（"时间 stdout F 载荷"）
+#         2. 从 kubelet 路径 /var/log/pods/<ns>_<pod>_<uid>/<container>/ 提取元数据
+#       真集群部署请用 k8s/daemonset.yaml（原生 kubernetes_logs + RBAC）
+# ============================================================
+
+data_dir: /vector-data-dir
+
+sources:
+  pod_logs:
+    type: file
+    include:
+      - /var/log/pods/*/*/*.log
+    read_from: beginning
+    fingerprint:
+      strategy: checksum
+    # kubelet 会截断超长行并用部分行标记，演示中关闭合并即可顺序读取
+    glob_minimum_cooldown_ms: 1000
+
+transforms:
+  # 复刻 kubernetes_logs：CRI 头剥离 + 路径元数据提取
+  k8s_simulate:
+    type: remap
+    inputs: [pod_logs]
+    source: |
+      # 从 kubelet 路径提取元数据:
+      # /var/log/pods/<namespace>_<pod_name>_<pod_uid>/<container_name>/0.log
+      path_meta, path_err = parse_regex(.file, r'/var/log/pods/(?P<namespace>[^_]+)_(?P<pod_name>[^_]+)_(?P<pod_uid>[^/]+)/(?P<container_name>[^/]+)/')
+      if path_err == null {
+        .kubernetes = {
+          "pod_namespace": path_meta.namespace,
+          "pod_name": path_meta.pod_name,
+          "pod_uid": path_meta.pod_uid,
+          "container_name": path_meta.container_name
+        }
+      }
+      # 剥离 CRI 头: "2026-09-03T04:00:52.000143303+00:00 stdout F {载荷}"
+      m, m_err = parse_regex(.message, r'^(?P<ts>\S+) (?P<stream>stdout|stderr) (?P<tag>\S) (?P<payload>.*)$')
+      if m_err == null {
+        .stream = m.stream
+        .message = m.payload
+        ts, ts_err = parse_timestamp(m.ts, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        }
+      }
+      # 载荷是 JSON 行则展开（与 kubernetes_logs 事件结构一致）
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+      }
+
+sinks:
+  local_file:
+    type: file
+    inputs: [k8s_simulate]
+    path: /var/lib/vector/output/kubernetes-%Y%m%d.ndjson
+    encoding:
+      codec: json
+
+  console:
+    type: console
+    inputs: [k8s_simulate]
+    encoding:
+      codec: json
+
+  # ---------------- Better Stack 官方 sink（可选） ----------------
+  # better_stack:
+  #   type: http
+  #   method: post
+  #   inputs: [k8s_simulate]
+  #   uri: "https://$INGESTING_HOST/"
+  #   encoding:
+  #     codec: json
+  #   compression: gzip
+  #   auth:
+  #     strategy: bearer
+  #     token: "$SOURCE_TOKEN"

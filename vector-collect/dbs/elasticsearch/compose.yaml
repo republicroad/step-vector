@@ -1,0 +1,45 @@
+name: vector-collect-elasticsearch
+
+services:
+  # 真实 Elasticsearch 8：单节点、关安全、512m 堆；JSON 日志写 logs 卷
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.2
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      # 默认 console（日志只走 stdout），改为 file 才会写 logs/docker-cluster.log
+      ES_LOG_STYLE: file
+      TZ: Asia/Shanghai
+    volumes:
+      - ./logs:/usr/share/elasticsearch/logs
+
+  # 模拟写入负载（等 ES 就绪后循环写文档）
+  client:
+    image: curlimages/curl:latest
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    environment:
+      NO_PROXY: "*"
+      no_proxy: "*"
+    command: >-
+      sh -c "sleep 90; while true; do curl -s -X PUT 'elasticsearch:9200/demo/_doc'
+      -H 'Content-Type: application/json' -d '{\"msg\":\"hello\"}' >/dev/null; sleep 5; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/usr/share/elasticsearch/logs:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:

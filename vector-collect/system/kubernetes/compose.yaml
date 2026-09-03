@@ -1,0 +1,42 @@
+name: vector-collect-kubernetes
+
+services:
+  # 模拟 kubelet 落盘：生成 /var/log/pods/<ns>_<pod>_<uid>/<container>/0.log (CRI 格式)
+  # 真集群采集请使用 ./k8s/daemonset.yaml
+  log-gen:
+    image: python:3-alpine
+    restart: unless-stopped
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+      - pod-logs:/var/log/pods
+    environment:
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+    command: python /app/gen-log.py
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - log-gen
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./kubeconfig:/etc/vector/kubeconfig:ro
+      - pod-logs:/var/log/pods:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+      # 集群外运行：指向假 kubeconfig 完成启动检查（无真实 API，元数据增强降级）
+      KUBECONFIG: /etc/vector/kubeconfig
+      # podman 注入的代理变量会让 k8s 客户端报 "kube/http-proxy disabled"，必须清空
+      HTTP_PROXY: ""
+      http_proxy: ""
+      HTTPS_PROXY: ""
+      https_proxy: ""
+      NO_PROXY: "*"
+      no_proxy: "*"
+
+volumes:
+  vector-data:
+  pod-logs:

@@ -1,0 +1,34 @@
+name: vector-collect-mongodb
+
+services:
+  # 真实 MongoDB：结构化(JSON)日志写文件
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    command: sh -c "mkdir -p /var/log/mongodb && exec mongod --logpath /var/log/mongodb/mongod.log --logappend --bind_ip_all"
+    volumes:
+      - ./logs:/var/log/mongodb
+
+  # 模拟读写负载
+  client:
+    image: mongo:7
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    command: sh -c "sleep 30; while true; do mongosh --quiet mongodb://mongodb:27017/demo --eval 'db.demo.insertOne({ts:new Date()}); db.demo.findOne();' >/dev/null 2>&1; sleep 5; done"
+
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      - mongodb
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./logs:/var/log/mongodb:ro
+      - ./output:/var/lib/vector/output
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+
+volumes:
+  vector-data:
