@@ -1,0 +1,24 @@
+# ============================================================
+# 集群 overlay 示例（cluster-a）
+# 复制此文件为 values.cluster-b.yaml 等，每个集群只改三样
+# ============================================================
+#
+# 安装：
+#   helm upgrade --install vector vector/vector \
+#     -n vector --create-namespace \
+#     -f values.yaml -f values.cluster-a.yaml
+
+env:
+  - name: VECTOR_CLUSTER_NAME
+    value: "cluster-a"
+
+# 按集群覆盖 sink 地域和 endpoint
+# ACK 同地域优先用内网 endpoint（免费且不出公网）
+customConfig:
+  sinks:
+    aliyun_oss:
+      region: cn-shenzhen
+      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
+    aliyun_oss_parquet:
+      region: cn-shenzhen
+      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
