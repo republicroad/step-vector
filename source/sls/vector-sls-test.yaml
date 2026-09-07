@@ -1,0 +1,136 @@
+# ============================================================
+# Vector 测试配置：消费 SLS (Kafka 协议) → console 打印（离线验证，无需 OSS 密钥）
+# ============================================================
+#
+# 用法（直接运行，需连接真实 SLS）：
+#   vector --config vector-sls-test.yaml
+#
+# 或通过 compose 运行（推荐，便于管理密钥挂载）：
+#   podman compose -f compose-test.yaml up -d
+#   podman compose logs -f vector
+#
+# 验证点：
+#   - SLS SASL_SSL 连接成功
+#   - 能正常消费指定 Project/Logstore 的数据
+#   - 解析 JSON 并提取 SLS 保留字段 (__topic__, __source__, __timestamp__ 等)
+#   - 事件时间解析正确（含 __timestamp__ 优先、RFC3339 回退）
+#   - partition 生成 Hive 分区字段（北京时间）
+#   - Kafka 元数据字段 (.topic/.partition/.offset/.message_key) 正确附加
+
+data_dir: /vector-data-dir
+
+# ------------------------------------------------------------------
+# 密钥管理：从本地 JSON 文件读取
+# ------------------------------------------------------------------
+secret:
+  sls_credentials:
+    type: file
+    path: /etc/vector/sls-secrets.json
+
+# ------------------------------------------------------------------
+# 数据源：消费 SLS (Kafka 协议)
+# ------------------------------------------------------------------
+sources:
+  sls_logs:
+    type: kafka
+    # 请在 secrets/sls-secrets.json 中配置 endpoint
+    bootstrap_servers: "${SLS_ENDPOINT}"
+    topics:
+      - "${SLS_TOPIC}"
+    group_id: vector-sls-test            # 测试用独立消费组，不影响生产位移
+    auto_offset_reset: earliest
+    session_timeout_ms: 30000
+    
+    # SASL_SSL + PLAIN（如需 SCRAM-SHA-512，参考 vector-sls.yaml 修改）
+    sasl:
+      enabled: true
+      mechanism: PLAIN
+      username: SECRET[sls_credentials.access_key_id]
+      password: SECRET[sls_credentials.access_key_secret]
+
+# ------------------------------------------------------------------
+# 转换：解析 SLS 日志 + 生成分区字段（与生产配置完全一致）
+# ------------------------------------------------------------------
+transforms:
+  parse_sls:
+    type: remap
+    inputs: [sls_logs]
+    source: |
+      raw_line = .message
+      ingest_ts = .timestamp
+      
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+        .message = raw_line
+        
+        # SLS 保留字段提取
+        if exists(parsed."__topic__") {
+          .sls_topic = parsed."__topic__"
+        }
+        if exists(parsed."__source__") {
+          .sls_source = parsed."__source__"
+        }
+        if exists(parsed."__timestamp__") {
+          .sls_timestamp = parsed."__timestamp__"
+        }
+        if exists(parsed."__partition_time__") {
+          .sls_partition_time = parsed."__partition_time__"
+        }
+        if exists(parsed."__shard__") {
+          .sls_shard = parsed."__shard__"
+        }
+        
+        .message = raw_line
+        
+        # 事件时间解析（优先 __timestamp__，回退 timestamp 字段，再回退摄入时间）
+        ts_raw = parsed."__timestamp__"
+        if ts_raw == null {
+          ts_raw = parsed.timestamp
+        }
+        if ts_raw == null {
+          ts_raw = ""
+        }
+        if ts_raw != "" {
+          ts_sec = to_int(ts_raw) ?? 0
+          result = null
+          if ts_sec > 10000000000 {
+            result, err = parse_timestamp(to_string!(ts_raw), format: "%s")
+          } else {
+            result, err = parse_timestamp(to_string!(ts_raw), format: "%+")
+          }
+          if err == null {
+            .timestamp = result
+          } else {
+            .timestamp = ingest_ts
+            log("SLS timestamp parse failed, using ingestion time: " + err, level: "warn")
+          }
+        } else {
+          .timestamp = ingest_ts
+        }
+      } else if err != null {
+        log("SLS message is not valid JSON line: " + err, level: "warn")
+      } else {
+        log("SLS message is JSON but not an object", level: "warn")
+      }
+
+  partition:
+    type: remap
+    inputs: [parse_sls]
+    source: |
+      .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+      .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+      .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+      .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+      .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
+
+# ------------------------------------------------------------------
+# 输出目标：console（离线验证用）
+# ------------------------------------------------------------------
+sinks:
+  console_out:
+    type: console
+    inputs: [partition]
+    target: stdout
+    encoding:
+      codec: json                    # 打印完整事件，便于核对元数据与分区字段
