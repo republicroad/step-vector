@@ -2,15 +2,22 @@
 # Vector 配置：消费阿里云 SLS (Kafka 协议) → 阿里云 OSS (JSON + Parquet 双输出)
 # ============================================================
 #
-# 参考文档：
-# - SLS Kafka 协议消费：https://www.alibabacloud.com/help/en/sls/use-the-kafka-protocol-to-upload-logs#aaccbd64bf9le
+# 参考文档（官方，链接已逐页核验）：
+# - SLS Kafka 兼容协议总览（含"消费需工单"提示）：https://www.alibabacloud.com/help/en/sls/use-the-kafka-protocol-to-upload-logs#aaccbd64bf9le
+# - 消费 SDK 总览/限制（Java/Go/Python/C#）：https://sls.aliyun.com/doc/en/oscompatibledemo/overview.html
+# - Confluent-Kafka-Go 消费示例（Vector 基于 librdkafka，认证写法同源）：
+#   https://sls.aliyun.com/doc/en/oscompatibledemo/confluent_go_kafka_consume.html
+# - 消息体字段场景/兼容限制（中文）：https://sls.aliyun.com/doc/oscompatibledemo/kafka_overview.html
 # - Vector Kafka source：https://vector.dev/docs/reference/configuration/sources/kafka/
 #
-# SLS Kafka 协议关键点：
-# - Endpoint 格式：${region}.log.aliyuncs.com:10011 (如 cn-hangzhou.log.aliyuncs.com:10011)
-# - Topic 映射：${project}_${logstore} (SLS 的 Project + Logstore 组合)
-# - 认证：SASL_SSL + PLAIN 或 SCRAM-SHA-512
-# - Topic 即为 SLS 的 Project_Logstore 组合
+# SLS Kafka 协议关键点（官方规范）：
+# - bootstrap = {Project名称}.{SLS Endpoint}:{端口}，Project 名作为域名前缀
+#     公网： {project}.{region}.log.aliyuncs.com:10012
+#     内网： {project}.{region}-intranet.log.aliyuncs.com:10011
+# - Topic = Logstore 名称（不支持通配符/正则，一个消费组最多消费 50 个 Logstore）
+# - 认证：强制 SASL_SSL；sasl.username = Project 名称；
+#         sasl.password = AccessKeyID#AccessKeySecret（# 拼接）
+# - Partition = Shard，Offset = Cursor
 # ============================================================
 
 data_dir: /vector-data-dir
@@ -21,130 +28,76 @@ data_dir: /vector-data-dir
 secret:
   sls_credentials:
     type: file
-    # 容器内路径，对应 compose/challenging 中挂载的 secrets/sls-secrets.json
+    # 容器内路径，对应挂载的 secrets/sls-secrets.json
+    # 需要 keys: project / access_key_id / access_key_secret / sasl_password(AK#SK)
     path: /etc/vector/sls-secrets.json
 
 # ------------------------------------------------------------------
-# 数据源：消费 SLS (Kafka 协议)
+# 数据源：SLS Kafka 兼容消费（librdkafka 消费者）
 # ------------------------------------------------------------------
 sources:
   sls_logs:
     type: kafka
-    # SLS Kafka 协议 Endpoint 格式：${region}.log.aliyuncs.com:10011
-    # 示例：cn-hangzhou.log.aliyuncs.com:10011
-    # 请在 secrets/sls-secrets.json 中配置 endpoint，或直接写死
+    # SLS_ENDPOINT 组装规则（三段拼接）：{Project名称}.{region 的 SLS Endpoint}:{端口}
+    #   公网： my-project.cn-hangzhou.log.aliyuncs.com:10012
+    #   内网： my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011
+    # Endpoint 域名查看：SLS 控制台 → Project 概览「访问域名」；
+    # 或官方服务入口列表 https://www.alibabacloud.com/help/en/sls/developer-reference/service-entrance
     bootstrap_servers: "${SLS_ENDPOINT}"
-    
-    # SLS Topic 映射规则：${project}_${logstore}
-    # 示例：my-project_my-logstore
-    # 支持正则匹配：以 ^ 开头按正则匹配（如 ^my-project_.*）
+
+    # Topic = Logstore 名称（Project 已在 endpoint 前缀中，无需再拼）
+    # 不支持通配符/正则，只能直接指定 Logstore 名
     topics:
-      - "${SLS_TOPIC}"
-    
-    group_id: vector-sls-oss               # 消费组：位移存 broker 端 __consumer_offsets
+      - "${SLS_LOGSTORE}"
+
+    group_id: vector-sls-oss               # 消费组：位移存 broker 端
     auto_offset_reset: earliest            # 无位移时从头消费；生产视需求改 latest
-    session_timeout_ms: 30000              # 心跳超时，SLS 建议 >= 30s
+    session_timeout_ms: 120000             # 官方消费示例使用 120s，防止处理偏慢触发 rebalance
     # commit_interval_ms: 5000             # 位移自动提交间隔（默认 5s）
-    
+
     # ================================================================
-    # 安全协议：SASL_SSL（SLS 强制要求）
-    # 两种认证机制任选其一，取消对应注释即可
+    # 认证：SLS 仅支持 SASL_SSL + PLAIN（协议版本 2.2）
+    # username = Project 名称
+    # password = AccessKeyID#AccessKeySecret（# 拼接，见 secrets 模板 sls_password）
     # ================================================================
-    
-    # Kafka SASL 认证配置（SLS 强制要求 SASL_SSL）
-    # 两种认证机制任选其一，取消对应注释即可
-    
-    # ----------------------------------------------------------------
-    # 方式一：SASL_SSL + PLAIN（最常用，SLS 默认支持）
-    # username = AccessKey ID，password = AccessKey Secret
-    # ----------------------------------------------------------------
     sasl:
       enabled: true
-      mechanism: PLAIN                     # 或 SCRAM-SHA-512
-      username: SECRET[sls_credentials.access_key_id]
-      password: SECRET[sls_credentials.access_key_secret]
-    
-    # ----------------------------------------------------------------
-    # 方式二：SASL_SSL + SCRAM-SHA-512（更安全，需 SLS 开启 SCRAM 支持）
-    # 取消下面注释并注释掉上面的 PLAIN 配置即可切换
-    # ----------------------------------------------------------------
-    # sasl:
-    #   enabled: true
-    #   mechanism: SCRAM-SHA-512
-    #   username: SECRET[sls_credentials.access_key_id]
-    #   password: SECRET[sls_credentials.access_key_secret]
-    
-    # TLS/SSL 配置（SLS 强制要求 SSL，Vector 会自动启用 TLS 当配置 sasl 时）
-    # 如需自定义 CA 证书路径，取消注释：
-    # tls:
-    #   enabled: true
-    #   ca_file: /etc/ssl/certs/ca-certificates.crt
-    
-    # Kafka 消费者优化参数（如需调优请参考 Vector 文档）
-    # fetch_max_bytes: 10485760
-    # fetch_wait_max_ms: 500
+      mechanism: PLAIN
+      username: SECRET[sls_credentials.project]
+      password: SECRET[sls_credentials.sasl_password]
+
+    # SASL_SSL 强制 TLS（SLS 不支持明文端口）
+    tls:
+      enabled: true
 
 # ------------------------------------------------------------------
-# 转换：解析 SLS 日志 + 生成分区字段
+# 转换：解析消费内容 + 事件时间规范化
 # ------------------------------------------------------------------
 transforms:
-  # 第一步：解析 SLS 日志 JSON + 提取 SLS 特有字段 + 事件时间戳
+  # 第一步：解析消息体 + 事件时间解析 + ts 规范化
   parse_sls:
     type: remap
     inputs: [sls_logs]
     source: |
-      raw_line = .message                  # 保留原始日志行
-      ingest_ts = .timestamp               # Vector 摄入时间（备用）
-      
-      # SLS 消息体通常为 JSON，包含 SLS 保留字段
+      raw_line = .message                  # 保留原始消息内容
+      ingest_ts = .timestamp               # Vector 摄入时间（兜底）
+
+      # SLS Kafka 消费 value 结构（官方规范）：
+      #   - Logstore 日志只有单个字段（如 content）→ value 为该字段值（非 JSON）
+      #   - 多字段日志 → value 为 JSON 编码内容（如 {"url":"/","method":"get"}）
       parsed, err = parse_json(.message)
       if err == null && is_object(parsed) {
-        . = merge!(., parsed)              # 将 JSON 字段提升到顶层
-        
-        # 保留原始消息体
-        .message = raw_line
-        
-        # ============================================================
-        # SLS 保留字段映射（SLS Kafka 协议特有字段）
-        # 参考：https://www.alibabacloud.com/help/en/sls/use-the-kafka-protocol-to-upload-logs#aaccbd64bf9le
-        # ============================================================
-        # __topic__       ->  日志主题（用户自定义，可为空）
-        # __source__      ->  日志来源（IP/主机名等）
-        # __timestamp__   ->  日志时间戳（Unix 秒，SLS 写入时间）
-        # __partition_time__ -> 分区时间（Unix 秒）
-        # __shard__       ->  Shard ID
-        # ============================================================
-        
-        # 提取 SLS 保留字段到结构化字段
-        if exists(parsed."__topic__") {
-          .sls_topic = parsed."__topic__"
-        }
-        if exists(parsed."__source__") {
-          .sls_source = parsed."__source__"
-        }
-        if exists(parsed."__timestamp__") {
-          .sls_timestamp = parsed."__timestamp__"
-        }
-        if exists(parsed."__partition_time__") {
-          .sls_partition_time = parsed."__partition_time__"
-        }
-        if exists(parsed."__shard__") {
-          .sls_shard = parsed."__shard__"
-        }
-        
-        # 恢复原始日志行作为 message 字段
-        .message = raw_line
-        
+        . = merge!(., parsed)              # JSON 字段提升到顶层
+        .message = raw_line                # 保留原始消息内容
+
         # ============================================================
         # 事件时间解析
         # 优先级：① 事件自身 timestamp 字段（裸格式按北京时间解释）
-        #         ② SLS 写入时间 __timestamp__（Unix 秒/毫秒）
-        #         ③ Vector 摄入时间（兜底）
+        #         ② Vector 摄入时间（兜底）
+        # 注意：SLS Kafka 消费的消息体不含 SLS 写入时间/保留字段，
+        #       时间以日志自身字段为准
         # ============================================================
         ts_raw = parsed.timestamp
-        if ts_raw == null {
-          ts_raw = parsed."__timestamp__"
-        }
         if ts_raw != null {
           ts_str = to_string!(ts_raw)
           ts_sec = to_int(ts_raw) ?? 0
@@ -154,7 +107,7 @@ transforms:
             # 毫秒级 Unix 时间戳 → 先转秒再解析
             result, err = parse_timestamp(to_string!(to_int!(ts_sec / 1000)), format: "%s")
           } else if ts_sec > 0 && !contains(ts_str, "-") {
-            # 秒级 Unix 时间戳（__timestamp__ 场景，纯数字）
+            # 秒级 Unix 时间戳（纯数字）
             result, err = parse_timestamp(ts_str, format: "%s")
           } else {
             # 字符串事件时间（如 2026-09-07 17:09:55,994，无时区后缀）
@@ -186,10 +139,12 @@ transforms:
         # 新接入的下游统一消费 ts，存量逐步迁移后可下线裸格式兼容分支
         # ============================================================
         .ts = format_timestamp!(.timestamp, format: "%+")
-        
+
         # kafka source 自动附加的元数据字段（保留用于排查）
-        # .topic / .partition / .offset / .message_key / .source_type
+        # .topic（=Logstore 名）/ .partition（=Shard）/ .offset（=Cursor 位置）
+        # / .message_key / .source_type
       } else if err != null {
+        # 单字段 content 日志的 value 为字段原值（非 JSON），保留原样
         log("SLS message is not valid JSON line: " + err, level: "warn")
       } else {
         log("SLS message is JSON but not an object", level: "warn")

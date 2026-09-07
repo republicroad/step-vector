@@ -22,17 +22,13 @@ TOPIC = os.environ.get("KAFKA_TOPIC", "app-logs")
 LATE_RATIO = float(os.environ.get("LATE_RATIO", "0.3"))
 LATE_MAX_BACKFILL_SECONDS = int(os.environ.get("LATE_MAX_BACKFILL_SECONDS", "43200"))
 
-# SLS 保留字段模拟
-SLS_PROJECT = os.environ.get("SLS_PROJECT", "test-project")
-SLS_LOGSTORE = os.environ.get("SLS_LOGSTORE", "test-logstore")
-SLS_TOPIC = f"{SLS_PROJECT}_{SLS_LOGSTORE}"
-
+# 业务字段模拟（贴近真实 SLS Kafka 消费的多字段日志 value 结构）
+# 注：真实 SLS 消费的消息体没有 __topic__/__source__/__timestamp__ 等保留字段，
+#     SLS 写入时间以 Kafka 消息的 .offset/.partition 等元数据 + 日志自身字段为准
 # 东八区（北京时间）：固定 +08:00 偏移，无夏令时，任意环境可用
 UTC8 = datetime.timezone(datetime.timedelta(hours=8), name="UTC+8")
 
 LEVELS = ["INFO", "INFO", "INFO", "WARN", "ERROR"]
-SOURCES = ["192.168.1.100", "192.168.1.101", "10.0.0.5", "k8s-node-1", "k8s-node-2"]
-TOPICS = ["access", "error", "audit", "security", "billing"]
 
 
 def beijing_naive(ts: datetime.datetime) -> str:
@@ -81,20 +77,8 @@ def main() -> None:
             ts = now
             late_tag = ""
         
-        # SLS 保留字段
-        sls_timestamp = int(ts.timestamp())  # Unix 秒
-        sls_partition_time = sls_timestamp
-        sls_shard = random.randint(0, 9)
-        
         rec = {
-            # SLS 保留字段（Kafka 协议标准字段）
-            "__topic__": random.choice(TOPICS),
-            "__source__": random.choice(SOURCES),
-            "__timestamp__": sls_timestamp,
-            "__partition_time__": sls_partition_time,
-            "__shard__": sls_shard,
-            
-            # 业务字段
+            # 业务字段（多字段日志 → SLS Kafka 消费 value 为 JSON 编码内容）
             # 注意：ts (RFC3339) 不由生产者输出，由 Vector transform 规范化生成
             "timestamp": beijing_naive(ts),
             "level": random.choice(LEVELS),
