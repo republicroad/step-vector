@@ -42,7 +42,8 @@ step-vector/
 │   └── system/                        #   auth_log/docker/kubernetes/ubuntu×2/ufw
 ├── source/                            # 专用 source 示例（写入 OSS）
 │   ├── k8s/                           #   kubernetes_logs DaemonSet 节点级采集 → OSS
-│   └── kafka/                         #   kafka source 消费 topic → OSS (JSON + Parquet)
+│   ├── kafka/                         #   kafka source 消费 topic → OSS (JSON + Parquet)
+│   └── sls/                           #   SLS Kafka 协议消费 → OSS (JSON + Parquet)
 └── tmp/                               # 临时实验 (metrics、logging 等)
 ```
 
@@ -188,6 +189,7 @@ duckdb -f duckdb/queries.sql
 - [x] **prometheus_scrape** - 指标抓取（`vector-collect/**/*_with_metrics/`）
 - [x] **postgresql_metrics** - PostgreSQL 指标（`vector-collect/dbs/postgresql_with_metrics/`）
 - [x] **kafka** - 消费 Kafka topic（`source/kafka/`）
+- [x] **sls** - 消费阿里云 SLS (Kafka 协议)（`source/sls/`）
 - [ ] **stdin** - 标准输入
 
 ### 待添加的 Transform 示例
