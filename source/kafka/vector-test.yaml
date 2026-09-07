@@ -1,0 +1,66 @@
+# ============================================================
+# Vector 测试配置：消费 Kafka topic → console 打印（离线验证，无需 OSS 密钥）
+# ============================================================
+#
+# 用法（由 compose-test.yaml 编排，挂载为 /etc/vector/vector.yaml）：
+#   podman compose -f compose-test.yaml up -d
+#   podman compose -f compose-test.yaml logs -f vector
+#
+# 验证点：
+#   - kafka source 能正常消费 app-logs topic
+#   - 事件带元数据字段 .topic/.partition/.offset/.message_key
+#   - parse_ts 提取事件时间（含 30% 晚到日志回填场景）
+#   - partition 生成 Hive 分区字段（北京时间）
+
+data_dir: /vector-data-dir
+
+sources:
+  kafka_logs:
+    type: kafka
+    bootstrap_servers: kafka:9092
+    topics: [app-logs]
+    group_id: vector-test            # 与生产配置的 group_id 分开，互不影响位移
+    auto_offset_reset: earliest
+
+transforms:
+  # 与生产 vector.yaml 完全一致：解析 JSON + 提取事件时间
+  parse_ts:
+    type: remap
+    inputs: [kafka_logs]
+    source: |
+      raw_line = .message
+      ingest_ts = .timestamp
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)
+        .message = raw_line
+        ts, ts_err = parse_timestamp(parsed.timestamp, format: "%+")
+        if ts_err == null {
+          .timestamp = ts
+        } else {
+          del(.timestamp)
+          .timestamp = ingest_ts
+          log("timestamp missing or not RFC3339, using ingestion time: " + ts_err, level: "warn")
+        }
+      } else if err != null {
+        log("message is not valid JSON line: " + err, level: "warn")
+      }
+
+  # 与生产 vector.yaml 完全一致：北京时间 Hive 分区字段
+  partition:
+    type: remap
+    inputs: [parse_ts]
+    source: |
+      .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+      .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+      .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+      .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+      .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
+
+sinks:
+  console_out:
+    type: console
+    inputs: [partition]
+    target: stdout
+    encoding:
+      codec: json                    # 打印完整事件，便于核对元数据与分区字段

@@ -40,6 +40,9 @@ step-vector/
 │   ├── webservers/                    #   nginx / apache
 │   ├── proxies/                       #   haproxy / traefik (×2 含指标)
 │   └── system/                        #   auth_log/docker/kubernetes/ubuntu×2/ufw
+├── source/                            # 专用 source 示例（写入 OSS）
+│   ├── k8s/                           #   kubernetes_logs DaemonSet 节点级采集 → OSS
+│   └── kafka/                         #   kafka source 消费 topic → OSS (JSON + Parquet)
 └── tmp/                               # 临时实验 (metrics、logging 等)
 ```
 
@@ -184,7 +187,7 @@ duckdb -f duckdb/queries.sql
 - [x] **docker_logs** - 容器日志（`vector-collect/system/docker/`）
 - [x] **prometheus_scrape** - 指标抓取（`vector-collect/**/*_with_metrics/`）
 - [x] **postgresql_metrics** - PostgreSQL 指标（`vector-collect/dbs/postgresql_with_metrics/`）
-- [ ] **kafka** - 消费 Kafka topic
+- [x] **kafka** - 消费 Kafka topic（`source/kafka/`）
 - [ ] **stdin** - 标准输入
 
 ### 待添加的 Transform 示例

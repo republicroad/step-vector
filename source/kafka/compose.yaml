@@ -1,0 +1,93 @@
+name: vector-kafka-to-oss
+
+services:
+  # ------------------------------------------------------------------
+  # Kafka 单节点（KRaft 模式，无 ZooKeeper）
+  # ------------------------------------------------------------------
+  kafka:
+    image: apache/kafka:4.0.0
+    restart: unless-stopped
+    ports:
+      - "9094:9094"                    # 供宿主机客户端（控制台/脚本）访问
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      # 容器网络内用 kafka:9092 通信；宿主机走 9094
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:9094
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3          # 默认分区数；分区数 = 消费并行度上限
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      TZ: Asia/Shanghai
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 15s
+
+  # ------------------------------------------------------------------
+  # 一次性建 topic（等 broker 健康后再执行）
+  # ------------------------------------------------------------------
+  kafka-init:
+    image: apache/kafka:4.0.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic app-logs \
+          --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+  # ------------------------------------------------------------------
+  # 模拟业务生产者：生成 JSON 日志发往 Kafka（含 30% 晚到日志）
+  # ------------------------------------------------------------------
+  producer:
+    image: python:3.12-alpine
+    restart: unless-stopped
+    depends_on: [kafka-init]
+    volumes:
+      - ./gen-log.py:/app/gen-log.py:ro
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      KAFKA_TOPIC: app-logs
+      TZ: Asia/Shanghai
+      PYTHONUNBUFFERED: "1"
+    # kafka-python-ng：kafka-python 的维护分支，纯 Python 实现在 alpine 上免编译
+    command: sh -c "pip install --no-cache-dir 'kafka-python-ng==2.2.3' && python /app/gen-log.py"
+
+  # ------------------------------------------------------------------
+  # Vector：消费 Kafka → 写 OSS（生产配置）
+  # ------------------------------------------------------------------
+  vector:
+    image: timberio/vector:latest-alpine
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./vector.yaml:/etc/vector/vector.yaml:ro
+      - ./secrets/oss-secrets.json:/etc/vector/oss-secrets.json:ro
+      - vector-data:/vector-data-dir
+    environment:
+      TZ: Asia/Shanghai
+      VECTOR_LOG: info
+      NO_PROXY: "aliyuncs.com,oss-cn-shenzhen.aliyuncs.com,vector-demo.oss-cn-shenzhen.aliyuncs.com,kafka,localhost,127.0.0.1"
+      no_proxy: "aliyuncs.com,oss-cn-shenzhen.aliyuncs.com,vector-demo.oss-cn-shenzhen.aliyuncs.com,kafka,localhost,127.0.0.1"
+
+volumes:
+  kafka-data:
+  vector-data:
