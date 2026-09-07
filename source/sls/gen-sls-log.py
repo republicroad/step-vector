@@ -27,13 +27,22 @@ SLS_PROJECT = os.environ.get("SLS_PROJECT", "test-project")
 SLS_LOGSTORE = os.environ.get("SLS_LOGSTORE", "test-logstore")
 SLS_TOPIC = f"{SLS_PROJECT}_{SLS_LOGSTORE}"
 
+# 东八区（北京时间）：固定 +08:00 偏移，无夏令时，任意环境可用
+UTC8 = datetime.timezone(datetime.timedelta(hours=8), name="UTC+8")
+
 LEVELS = ["INFO", "INFO", "INFO", "WARN", "ERROR"]
 SOURCES = ["192.168.1.100", "192.168.1.101", "10.0.0.5", "k8s-node-1", "k8s-node-2"]
 TOPICS = ["access", "error", "audit", "security", "billing"]
 
 
-def rfc3339(ts: datetime.datetime) -> str:
-    return ts.isoformat(timespec="milliseconds")
+def beijing_naive(ts: datetime.datetime) -> str:
+    """模拟存量项目的裸格式时间：2026-09-07 17:09:55,994（北京时间，无时区后缀）。
+
+    Vector 的 parse_sls transform 会把该裸格式按北京时间解释，
+    并为事件规范化生成 ts 字段（RFC3339），生产者无需输出 ts。
+    """
+    ms = ts.microsecond // 1000
+    return ts.strftime("%Y-%m-%d %H:%M:%S") + f",{ms:03d}"
 
 
 def connect() -> KafkaProducer:
@@ -60,7 +69,7 @@ def main() -> None:
     print(f"Starting SLS log generator -> topic: {TOPIC}, late_ratio={LATE_RATIO}", flush=True)
     
     while True:
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = datetime.datetime.now(UTC8)
         
         # 晚到模拟：部分日志时间戳回填到过去
         if random.random() < LATE_RATIO:
@@ -86,7 +95,8 @@ def main() -> None:
             "__shard__": sls_shard,
             
             # 业务字段
-            "timestamp": rfc3339(ts),
+            # 注意：ts (RFC3339) 不由生产者输出，由 Vector transform 规范化生成
+            "timestamp": beijing_naive(ts),
             "level": random.choice(LEVELS),
             "message": f"test log{late_tag}",
             "order_id": random.randint(10000, 99999),

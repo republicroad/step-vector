@@ -13,7 +13,9 @@
 #   - SLS SASL_SSL 连接成功
 #   - 能正常消费指定 Project/Logstore 的数据
 #   - 解析 JSON 并提取 SLS 保留字段 (__topic__, __source__, __timestamp__ 等)
-#   - 事件时间解析正确（含 __timestamp__ 优先、RFC3339 回退）
+#   - 事件时间解析正确：事件 timestamp 优先（裸格式 2026-09-07 17:09:55,994
+#     按北京时间解释），无事件时间时回退 __timestamp__
+#   - ts 字段为 RFC3339 格式（Vector 规范化生成，UTC）
 #   - partition 生成 Hive 分区字段（北京时间）
 #   - Kafka 元数据字段 (.topic/.partition/.offset/.message_key) 正确附加
 
@@ -83,21 +85,39 @@ transforms:
         
         .message = raw_line
         
-        # 事件时间解析（优先 __timestamp__，回退 timestamp 字段，再回退摄入时间）
-        ts_raw = parsed."__timestamp__"
+        # ============================================================
+        # 事件时间解析（与生产 vector-sls.yaml 完全一致）
+        # 优先级：① 事件自身 timestamp 字段（裸格式按北京时间解释）
+        #         ② SLS 写入时间 __timestamp__（Unix 秒/毫秒）
+        #         ③ Vector 摄入时间（兜底）
+        # ============================================================
+        ts_raw = parsed.timestamp
         if ts_raw == null {
-          ts_raw = parsed.timestamp
+          ts_raw = parsed."__timestamp__"
         }
-        if ts_raw == null {
-          ts_raw = ""
-        }
-        if ts_raw != "" {
+        if ts_raw != null {
+          ts_str = to_string!(ts_raw)
           ts_sec = to_int(ts_raw) ?? 0
           result = null
+          err = null
           if ts_sec > 10000000000 {
-            result, err = parse_timestamp(to_string!(ts_raw), format: "%s")
+            # 毫秒级 Unix 时间戳 → 先转秒再解析
+            result, err = parse_timestamp(to_string!(to_int!(ts_sec / 1000)), format: "%s")
+          } else if ts_sec > 0 && !contains(ts_str, "-") {
+            # 秒级 Unix 时间戳（__timestamp__ 场景，纯数字）
+            result, err = parse_timestamp(ts_str, format: "%s")
           } else {
-            result, err = parse_timestamp(to_string!(ts_raw), format: "%+")
+            # 字符串事件时间（如 2026-09-07 17:09:55,994，无时区后缀）
+            # 裸格式按北京时间解释：追加 +08:00 后解析，不依赖容器时区设置
+            result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S,%3f %:z")
+            if err != null {
+              # 点号毫秒变体：2026-09-07 17:09:55.994
+              result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S.%3f %:z")
+            }
+            if err != null {
+              # RFC3339 兼容（存量/新项目规范格式）
+              result, err = parse_timestamp(ts_str, format: "%+")
+            }
           }
           if err == null {
             .timestamp = result
@@ -108,6 +128,11 @@ transforms:
         } else {
           .timestamp = ingest_ts
         }
+
+        # ============================================================
+        # 规范化时间字段 ts (RFC3339)：下游统一消费 ts
+        # ============================================================
+        .ts = format_timestamp!(.timestamp, format: "%+")
       } else if err != null {
         log("SLS message is not valid JSON line: " + err, level: "warn")
       } else {

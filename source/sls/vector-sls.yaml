@@ -136,27 +136,39 @@ transforms:
         .message = raw_line
         
         # ============================================================
-        # 事件时间戳解析（优先使用 SLS 写入时间 __timestamp__）
+        # 事件时间解析
+        # 优先级：① 事件自身 timestamp 字段（裸格式按北京时间解释）
+        #         ② SLS 写入时间 __timestamp__（Unix 秒/毫秒）
+        #         ③ Vector 摄入时间（兜底）
         # ============================================================
-        ts_raw = parsed."__timestamp__"
+        ts_raw = parsed.timestamp
         if ts_raw == null {
-          ts_raw = parsed.timestamp
+          ts_raw = parsed."__timestamp__"
         }
-        if ts_raw == null {
-          ts_raw = ""
-        }
-        if ts_raw != "" {
-          # __timestamp__ 通常为 Unix 秒（整数）或 RFC3339 字符串
-          ts_sec = to_int(ts_raw) ?? 0
-          # 确保 ts_raw 是字符串类型（使用 ! 使其 infallible）
+        if ts_raw != null {
           ts_str = to_string!(ts_raw)
+          ts_sec = to_int(ts_raw) ?? 0
           result = null
-          if ts_sec > 10000000000 {  # 判断是否为毫秒级（> 2001年）
+          err = null
+          if ts_sec > 10000000000 {
+            # 毫秒级 Unix 时间戳 → 先转秒再解析
+            result, err = parse_timestamp(to_string!(to_int!(ts_sec / 1000)), format: "%s")
+          } else if ts_sec > 0 && !contains(ts_str, "-") {
+            # 秒级 Unix 时间戳（__timestamp__ 场景，纯数字）
             result, err = parse_timestamp(ts_str, format: "%s")
           } else {
-            result, err = parse_timestamp(ts_str, format: "%+")
+            # 字符串事件时间（如 2026-09-07 17:09:55,994，无时区后缀）
+            # 裸格式按北京时间解释：追加 +08:00 后解析，不依赖容器时区设置
+            result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S,%3f %:z")
+            if err != null {
+              # 点号毫秒变体：2026-09-07 17:09:55.994
+              result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S.%3f %:z")
+            }
+            if err != null {
+              # RFC3339 兼容（存量/新项目规范格式）
+              result, err = parse_timestamp(ts_str, format: "%+")
+            }
           }
-          # result 为 null 表示解析失败
           if err == null {
             .timestamp = result
           } else {
@@ -166,6 +178,14 @@ transforms:
         } else {
           .timestamp = ingest_ts
         }
+
+        # ============================================================
+        # 规范化时间字段 ts (RFC3339)
+        # 全球业务建议日志原生采用 RFC3339；为兼容存量项目（裸格式时间），
+        # Vector 在此为每条事件强制生成 ts 字段（RFC3339/UTC），
+        # 新接入的下游统一消费 ts，存量逐步迁移后可下线裸格式兼容分支
+        # ============================================================
+        .ts = format_timestamp!(.timestamp, format: "%+")
         
         # kafka source 自动附加的元数据字段（保留用于排查）
         # .topic / .partition / .offset / .message_key / .source_type
@@ -220,10 +240,10 @@ sinks:
       max_bytes: 10485760        # 10 MB
       max_events: 100000
 
-    # 认证：从 secret 文件引用
+    # 认证：从 secret 文件引用（SLS SASL 与 OSS 写入共用同一对 AK/SK）
     auth:
-      access_key_id: SECRET[oss_credentials.access_key_id]
-      secret_access_key: SECRET[oss_credentials.secret_access_key]
+      access_key_id: SECRET[sls_credentials.access_key_id]
+      secret_access_key: SECRET[sls_credentials.access_key_secret]
 
   # ------------------------------------------------------------------
   # 输出目标：Parquet 列式格式写入 OSS
@@ -258,5 +278,5 @@ sinks:
       max_events: 100000
 
     auth:
-      access_key_id: SECRET[oss_credentials.access_key_id]
-      secret_access_key: SECRET[oss_credentials.secret_access_key]
+      access_key_id: SECRET[sls_credentials.access_key_id]
+      secret_access_key: SECRET[sls_credentials.access_key_secret]
