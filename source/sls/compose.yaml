@@ -1,0 +1,45 @@
+
+name: vector-sls-to-oss
+
+services:
+  vector:
+    # 版本固定：避免 latest 漂移导致行为变化（升级时先在测试环境验证）
+    image: timberio/vector:0.58.0-alpine
+    restart: unless-stopped
+
+    ports:
+      # Vector API（vector top / 监控）：仅映射到宿主机回环，本机可达
+      - "127.0.0.1:8686:8686"
+
+    # 容器日志轮转：单文件 50MB，防止长期运行撑爆磁盘
+    # 注：本版 podman-compose 不透传 logging.options（仅识别驱动），
+    #     实际大小上限由 containers.conf 的 log_size_max 兜底
+    logging:
+      driver: k8s-file
+      options:
+        max_size: 50m
+
+    volumes:
+      # 配置与密钥只读挂载（镜像默认加载 /etc/vector/vector.yaml）
+      # 挂载哪个配置由 SLS_CONFIG 环境变量决定（compose 层替换，与 Vector 无关）：
+      #   公网（默认）： podman compose up -d
+      #   内网（须在同地域 cn-hangzhou VPC 内运行）： SLS_CONFIG=vector-sls-intranet.yaml podman compose up -d
+      #   （PowerShell: $env:SLS_CONFIG="vector-sls-intranet.yaml"; podman compose up -d）
+      - ./${SLS_CONFIG:-vector-sls.yaml}:/etc/vector/vector.yaml:ro
+      - ./secrets/sls-secrets.json:/etc/vector/sls-secrets.json:ro
+      # data_dir 独立命名卷：checkpoint 与磁盘 buffer 持久化
+      # 命名卷首次创建时会继承镜像内 /vector-data-dir 的属主权限，
+      # 因此非 root 的 vector 用户可直接读写，无需额外 chown
+      - vector-data:/vector-data-dir
+
+    environment:
+      TZ: Asia/Shanghai
+      VECTOR_LOG: info
+      # podman 会把宿主机代理变量注入容器，但容器内 127.0.0.1:7890 不可达；
+      # SLS(Kafka 公网 10012) 与 OSS 可直连，故用 NO_PROXY 让 librdkafka/AWS SDK
+      # 对 aliyuncs.com 域直连(跳过代理)
+      NO_PROXY: "aliyuncs.com,my-project.cn-hangzhou.log.aliyuncs.com,oss-cn-hangzhou.aliyuncs.com,vector-demo.oss-cn-hangzhou.aliyuncs.com,localhost,127.0.0.1"
+      no_proxy: "aliyuncs.com,my-project.cn-hangzhou.log.aliyuncs.com,oss-cn-hangzhou.aliyuncs.com,vector-demo.oss-cn-hangzhou.aliyuncs.com,localhost,127.0.0.1"
+
+volumes:
+  vector-data:

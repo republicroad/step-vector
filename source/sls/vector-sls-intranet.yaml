@@ -1,0 +1,307 @@
+# ============================================================
+# Vector 配置（内网）：消费阿里云 SLS (Kafka 协议) → 阿里云 OSS (JSON + Parquet 双输出)
+# ============================================================
+#
+# 本文件为 vector-sls.yaml 的内网 endpoint 变体，仅 bootstrap_servers 不同：
+#   公网（vector-sls.yaml）：my-project.cn-hangzhou.log.aliyuncs.com:10012
+#   内网（本文件）:        my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011
+# 适用场景：同地域（cn-hangzhou）ECS/ACK/容器等 VPC 内运行，走内网免流量费且延迟更低。
+#
+# 参考文档（官方，链接已逐页核验）：
+# - SLS Kafka 兼容协议总览：https://www.alibabacloud.com/help/en/sls/use-the-kafka-protocol-to-upload-logs#aaccbd64bf9le
+# - 消费 SDK 总览/限制（Java/Go/Python/C#）：https://sls.aliyun.com/doc/en/oscompatibledemo/overview.html
+# - Confluent-Kafka-Go 消费示例（Vector 基于 librdkafka，认证写法同源）：
+#   https://sls.aliyun.com/doc/en/oscompatibledemo/confluent_go_kafka_consume.html
+# - 消息体字段场景/兼容限制（中文）：https://sls.aliyun.com/doc/oscompatibledemo/kafka_overview.html
+# - Vector Kafka source：https://vector.dev/docs/reference/configuration/sources/kafka/
+#
+# SLS Kafka 协议关键点（官方规范）：
+# - bootstrap = {Project名称}.{SLS Endpoint}:{端口}，Project 名作为域名前缀
+#     公网： {project}.{region}.log.aliyuncs.com:10012
+#     内网： {project}.{region}-intranet.log.aliyuncs.com:10011
+# - Topic = Logstore 名称（不支持通配符/正则，一个消费组最多消费 50 个 Logstore）
+# - 认证：强制 SASL_SSL；sasl.username = Project 名称；
+#         sasl.password = AccessKeyID#AccessKeySecret（# 拼接）
+# - Partition = Shard，Offset = Cursor
+# ============================================================
+
+data_dir: /vector-data-dir
+
+# ------------------------------------------------------------------
+# Vector API：供 vector top / 监控数据源观测运行状态
+# compose 已将 127.0.0.1:8686 映射到宿主机，仅本机可达
+# ------------------------------------------------------------------
+api:
+  enabled: true
+  address: 0.0.0.0:8686
+
+# ------------------------------------------------------------------
+# 密钥管理：从本地 JSON 文件读取，不在 YAML 中明文写入
+# ------------------------------------------------------------------
+secret:
+  sls_credentials:
+    type: file
+    # 容器内路径，对应挂载的 secrets/sls-secrets.json
+    # 需要 keys: project / access_key_id / access_key_secret / sasl_password(AK#SK)
+    path: /etc/vector/sls-secrets.json
+
+# ------------------------------------------------------------------
+# 数据源：SLS Kafka 兼容消费（librdkafka 消费者）
+# ------------------------------------------------------------------
+sources:
+  sls_logs:
+    type: kafka
+    # SLS_ENDPOINT 组装规则（三段拼接）：{Project名称}.{region 的 SLS Endpoint}:{端口}
+    #   公网： my-project.cn-hangzhou.log.aliyuncs.com:10012
+    #   内网： my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011
+    # Endpoint 域名查看：SLS 控制台 → Project 概览「访问域名」；
+    # 或官方服务入口列表 https://www.alibabacloud.com/help/en/sls/developer-reference/service-entrance
+    # 内网（本文件）：{project}.cn-hangzhou-intranet.log.aliyuncs.com:10011（需与 Project 同地域 VPC）
+    # 公网（vector-sls.yaml）：{project}.cn-hangzhou.log.aliyuncs.com:10012
+    bootstrap_servers: "my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011"
+
+    # Topic = Logstore 名称（Project 已在 endpoint 前缀中，无需再拼）
+    # 不支持通配符/正则，只能直接指定 Logstore 名
+    topics:
+      - app-logs
+
+    group_id: vector-sls-oss               # 消费组：位移存 broker 端
+    # latest：位移丢失/新建组时从最新开始，避免全量重放造成 OSS 大量重复
+    # 需回补历史时：新建消费组 + earliest，或临时改 earliest 消费完再改回
+    auto_offset_reset: latest              # 无位移时从最新开始消费
+    session_timeout_ms: 120000             # 官方消费示例使用 120s，防止处理偏慢触发 rebalance
+    # commit_interval_ms: 5000             # 位移自动提交间隔（默认 5s）
+
+    # ================================================================
+    # 认证：SLS 仅支持 SASL_SSL + PLAIN（协议版本 2.2）
+    # username = Project 名称
+    # password = AccessKeyID#AccessKeySecret（# 拼接，见 secrets 模板 sls_password）
+    # ================================================================
+    sasl:
+      enabled: true
+      mechanism: PLAIN
+      username: SECRET[sls_credentials.project]
+      password: SECRET[sls_credentials.sasl_password]
+
+    # SASL_SSL 强制 TLS（SLS 不支持明文端口）
+    tls:
+      enabled: true
+
+# ------------------------------------------------------------------
+# 转换：解析消费内容 + 事件时间规范化（与公网 vector-sls.yaml 完全一致）
+# ------------------------------------------------------------------
+transforms:
+  # 第一步：解析消息体 + 事件时间解析 + ts 规范化
+  parse_sls:
+    type: remap
+    inputs: [sls_logs]
+    source: |
+      raw_line = .message                  # 保留原始消息内容
+      ingest_ts = .timestamp               # Vector 摄入时间（兜底）
+
+      # SLS Kafka 消费 value 结构（官方规范）：
+      #   - Logstore 日志只有单个字段（如 content）→ value 为该字段值（非 JSON）
+      #   - 多字段日志 → value 为 JSON 编码内容（如 {"url":"/","method":"get"}）
+      parsed, err = parse_json(.message)
+      if err == null && is_object(parsed) {
+        . = merge!(., parsed)              # JSON 字段提升到顶层
+        .message = raw_line                # 保留原始消息内容
+
+        # ============================================================
+        # 事件时间解析
+        # 优先级：① 事件自身 timestamp 字段（裸格式按北京时间解释）
+        #         ② Vector 摄入时间（兜底）
+        # 注意：SLS Kafka 消费的消息体不含 SLS 写入时间/保留字段，
+        #       时间以日志自身字段为准
+        # ============================================================
+        ts_raw = parsed.timestamp
+        if ts_raw != null {
+          ts_str = to_string!(ts_raw)
+          ts_sec = to_int(ts_raw) ?? 0
+          result = null
+          err = null
+          if ts_sec > 10000000000 {
+            # 毫秒级 Unix 时间戳 → 先转秒再解析
+            result, err = parse_timestamp(to_string(to_int(ts_sec / 1000)), format: "%s")
+          } else if ts_sec > 0 && !contains(ts_str, "-") {
+            # 秒级 Unix 时间戳（纯数字）
+            result, err = parse_timestamp(ts_str, format: "%s")
+          } else {
+            # 字符串事件时间（如 2026-09-07 17:09:55,994，无时区后缀）
+            # 裸格式按北京时间解释：追加 +08:00 后解析，不依赖容器时区设置
+            result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S,%3f %:z")
+            if err != null {
+              # 点号毫秒变体：2026-09-07 17:09:55.994
+              result, err = parse_timestamp(ts_str + " +08:00", format: "%Y-%m-%d %H:%M:%S.%3f %:z")
+            }
+            if err != null {
+              # RFC3339 兼容（存量/新项目规范格式）
+              result, err = parse_timestamp(ts_str, format: "%+")
+            }
+          }
+          if err == null {
+            .timestamp = result
+          } else {
+            .timestamp = ingest_ts
+            log("SLS timestamp parse failed, using ingestion time: " + err, level: "warn")
+          }
+        } else {
+          .timestamp = ingest_ts
+        }
+
+        # ============================================================
+        # 规范化时间字段 ts (RFC3339)
+        # 全球业务建议日志原生采用 RFC3339；为兼容存量项目（裸格式时间），
+        # Vector 在此为每条事件强制生成 ts 字段（RFC3339/UTC），
+        # 新接入的下游统一消费 ts，存量逐步迁移后可下线裸格式兼容分支
+        # ============================================================
+        .ts = format_timestamp!(.timestamp, format: "%+")
+
+        # kafka source 自动附加的元数据字段（保留用于排查）
+        # .topic（=Logstore 名）/ .partition（=Shard）/ .offset（=Cursor 位置）
+        # / .message_key / .source_type
+      } else if err != null {
+        # 单字段 content 日志的 value 为字段原值（非 JSON），保留原样
+        log("SLS message is not valid JSON line: " + err, level: "warn")
+      } else {
+        log("SLS message is JSON but not an object", level: "warn")
+      }
+
+  # 第二步：从事件时间戳生成 Hive 风格分区字段 (北京时间)
+  partition:
+    type: remap
+    inputs: [parse_sls]
+    source: |
+      # ============================================================
+      # 清理空对象/空数组字段（如 headers:{}）
+      # 原因：空对象在 Parquet 编码时成为 empty struct，ArrowWriter 报
+      #       "Parquet does not support writing empty structs"，
+      #       导致整批事件被丢弃
+      # ============================================================
+      . = filter(object(.)) -> |_key, value| {
+        !(is_object(value) && length(object!(value)) == 0) && !(is_array(value) && length(array!(value)) == 0)
+      }
+
+      # 按北京时间格式化分区字段，用于 key_prefix 模板
+      .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+      .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+      .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+      .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+      .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
+
+  # 第三步：Parquet 输出准备
+  # 1) 删除冗余 message 列：Parquet 已含解析后的顶层字段，message（完整 JSON 原文）
+  #    会造成数据双份存储（约占体积 60%）；JSON sink 走 raw_message 编码仍用 message，不受影响
+  # 2) 字段类型治理：若字段存在跨文件类型漂移（同一字段时为数字时为字符串，DuckDB 跨文件
+  #    联合查询会报"列类型必须一致"），在此按 `.foo = to_string(.foo) ?? .foo` 方式强制统一
+  parquet_prepare:
+    type: remap
+    inputs: [partition]
+    source: |
+      del(.message)
+
+# ------------------------------------------------------------------
+# 输出目标：JSON 格式写入 OSS
+# ------------------------------------------------------------------
+sinks:
+  aliyun_oss:
+    type: aws_s3                 # OSS 兼容 S3 API，用 aws_s3 sink
+    inputs: [partition]
+
+    # OSS 连接配置（与 vector2oss 相同的资源）
+    bucket: vector-demo
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
+    force_path_style: false      # OSS 仅支持虚拟托管寻址 (<bucket>.oss-<region>.aliyuncs.com)
+
+    # 对象路径：Hive 分区格式 (year/month/day/hour/minute)
+    key_prefix: "sls/log_json/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/minute={{ partition_minute }}/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"   # Unix 时间戳作为文件名前缀
+    filename_append_uuid: true   # 追加 UUID 防覆盖
+
+    # 写入格式：原始日志行 (换行分隔)，下游直接消费无需剥 Vector 包裹层
+    compression: gzip
+    encoding:
+      codec: raw_message         # 对象内容 = 原始日志行
+    framing:
+      method: newline_delimited
+
+    # ================================================================
+    # 批次控制（OSS 最佳实践：对象 64MB+ 量级、减少小对象与 PUT 请求次数）
+    # 事件按 key_prefix 模板自动分桶（每个分钟分区独立成批，互不干扰）：
+    #   - timeout_secs: 分区桶 5 分钟无新事件即 flush（对象最多延迟 5 分钟落盘）
+    #   - max_bytes:    当前 ~20MB 原始事件/分钟，32MB 上限保证正常每分钟 1 个对象
+    #   - max_events:   兜底上限（~2KB/条时不会先于 max_bytes 触发）
+    # ================================================================
+    batch:
+      timeout_secs: 300
+      max_bytes: 33554432        # 32 MB
+      max_events: 100000
+
+    # 磁盘 buffer：OSS 故障时事件落盘暂存（存于 data_dir 命名卷），恢复后续传
+    # ~350KB/s 流量可扛约 4 小时 OSS 不可用；写满后背压暂停消费，不丢数据
+    buffer:
+      type: disk
+      max_size: 5368709120       # 5 GiB
+      when_full: block
+
+    # 端到端 at-least-once：OSS 写入成功确认后，Kafka 消费位移才提交
+    acknowledgements:
+      enabled: true
+
+    # 认证：从 secret 文件引用（SLS SASL 与 OSS 写入共用同一对 AK/SK）
+    auth:
+      access_key_id: SECRET[sls_credentials.access_key_id]
+      secret_access_key: SECRET[sls_credentials.access_key_secret]
+
+  # ------------------------------------------------------------------
+  # 输出目标：Parquet 列式格式写入 OSS
+  # ------------------------------------------------------------------
+  aliyun_oss_parquet:
+    type: aws_s3
+    inputs: [parquet_prepare]
+
+    # OSS 连接配置（与 vector2oss 相同的资源）
+    bucket: vector-demo
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
+    force_path_style: false
+
+    # 对象路径：Hive 分区格式 (无 minute，Parquet 按小时聚合)
+    key_prefix: "sls/log_parquet/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
+    timezone: Asia/Shanghai
+    filename_time_format: "%s"
+    filename_append_uuid: true
+
+    # 写入格式：Parquet 列式 (下游 Athena/EMR 分析更友好)
+    encoding:
+      codec: json                # 占位，batch_encoding 会接管
+    batch_encoding:
+      codec: parquet
+      schema_mode: auto_infer    # 自动推断 schema，无需预定义
+      compression:
+        algorithm: zstd          # 列页内压缩：zstd (高压缩比，较 snappy 省 ~20-30% 存储) | snappy (快) | gzip | lz4 | none
+        level: 3                 # zstd 级别 1-6（默认 3）；Vector 0.58 要求 zstd 必须显式配置 level
+
+    # ================================================================
+    # 批次控制（小时分区桶）：64MB 上限避免小时桶被切成 ~125 个小文件/小时
+    # （10MB 上限会产生 Parquet 小文件泛滥，拖累下游扫描与 OSS 请求效率）
+    # ================================================================
+    batch:
+      timeout_secs: 300
+      max_bytes: 67108864        # 64 MB
+      max_events: 100000
+
+    # 磁盘 buffer + acknowledgements：与 JSON sink 相同的可靠性策略
+    buffer:
+      type: disk
+      max_size: 5368709120       # 5 GiB
+      when_full: block
+
+    acknowledgements:
+      enabled: true
+
+    auth:
+      access_key_id: SECRET[sls_credentials.access_key_id]
+      secret_access_key: SECRET[sls_credentials.access_key_secret]

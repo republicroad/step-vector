@@ -42,11 +42,14 @@ sources:
     # SLS_ENDPOINT 组装规则：{Project名称}.{region 的 SLS Endpoint}:{端口}
     #   公网： my-project.cn-hangzhou.log.aliyuncs.com:10012
     #   内网： my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011
-    bootstrap_servers: "${SLS_ENDPOINT}"
+    # 测试从本机/开发环境运行，使用公网 endpoint（内网需同地域 VPC）：
+    #   公网： my-project.cn-hangzhou.log.aliyuncs.com:10012
+    #   内网： my-project.cn-hangzhou-intranet.log.aliyuncs.com:10011
+    bootstrap_servers: "my-project.cn-hangzhou.log.aliyuncs.com:10012"
 
     # Topic = Logstore 名称（Project 已在 endpoint 前缀中，无需再拼）
     topics:
-      - "${SLS_LOGSTORE}"
+      - app-logs
 
     group_id: vector-sls-test            # 测试用独立消费组，不影响生产位移
     auto_offset_reset: earliest
@@ -134,6 +137,11 @@ transforms:
     type: remap
     inputs: [parse_sls]
     source: |
+      # 清理空对象/空数组字段（与生产配置一致，验证 transform 行为）
+      . = filter(object(.)) -> |_key, value| {
+        !(is_object(value) && length(object!(value)) == 0) && !(is_array(value) && length(array!(value)) == 0)
+      }
+
       .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
       .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
       .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")

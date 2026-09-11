@@ -1,0 +1,36 @@
+
+# 排查用：以 vector-sls-test.yaml（console sink）运行，打印消费到的真实事件
+# 用法: podman compose -f compose-test.yaml up -d && podman compose -f compose-test.yaml logs -f
+# 退出: podman compose -f compose-test.yaml down
+
+name: vector-sls-test
+
+services:
+  vector:
+    # 版本固定：与生产 compose.yaml 保持一致
+    image: timberio/vector:0.58.0-alpine
+    restart: unless-stopped
+
+    # 容器日志轮转：单文件 50MB（console 输出量大，必配）
+    # 注：本版 podman-compose 不透传 logging.options（仅识别驱动），
+    #     实际大小上限由 containers.conf 的 log_size_max 兜底
+    logging:
+      driver: k8s-file
+      options:
+        max_size: 50m
+
+    volumes:
+      # 测试配置（console 输出），镜像默认加载 /etc/vector/vector.yaml
+      - ./vector-sls-test.yaml:/etc/vector/vector.yaml:ro
+      - ./secrets/sls-secrets.json:/etc/vector/sls-secrets.json:ro
+      # 独立 data 卷，与生产 checkpoint 隔离
+      - vector-data-test:/vector-data-dir
+
+    environment:
+      TZ: Asia/Shanghai
+      VECTOR_LOG: info
+      NO_PROXY: "aliyuncs.com,my-project.cn-hangzhou.log.aliyuncs.com,oss-cn-hangzhou.aliyuncs.com,vector-demo.oss-cn-hangzhou.aliyuncs.com,localhost,127.0.0.1"
+      no_proxy: "aliyuncs.com,my-project.cn-hangzhou.log.aliyuncs.com,oss-cn-hangzhou.aliyuncs.com,vector-demo.oss-cn-hangzhou.aliyuncs.com,localhost,127.0.0.1"
+
+volumes:
+  vector-data-test:
