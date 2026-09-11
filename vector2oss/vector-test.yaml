@@ -87,8 +87,8 @@ sinks:
 
     # OSS 连接配置
     bucket: vector-demo
-    region: cn-shenzhen
-    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
     force_path_style: false      # OSS 仅支持虚拟托管寻址
 
     # 事件时间分割：模板引用解析后的事件时间 (依赖上方 parse + partition transform)
@@ -124,8 +124,8 @@ sinks:
 
     # OSS 连接配置 (同上)
     bucket: vector-demo
-    region: cn-shenzhen
-    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
     force_path_style: false
 
     # 对象路径：Hive 分区格式 (无 minute，Parquet 按小时聚合)

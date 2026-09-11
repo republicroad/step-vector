@@ -69,6 +69,14 @@ transforms:
       .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
       .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
 
+  # 第三步：Parquet 输出准备：删除冗余 message 列（Parquet 已含解析后字段，
+  # 原始日志行不重复存储，体积约省 60%）；JSON sink 走 raw_message 编码仍用 message
+  parquet_prepare:
+    type: remap
+    inputs: [partition]
+    source: |
+      del(.message)
+
 # ------------------------------------------------------------------
 # 输出目标：JSON 格式写入 OSS
 # ------------------------------------------------------------------
@@ -79,8 +87,8 @@ sinks:
 
     # OSS 连接配置
     bucket: vector-demo
-    region: cn-shenzhen
-    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
     force_path_style: false      # OSS 仅支持虚拟托管寻址 (<bucket>.oss-<region>.aliyuncs.com)
 
     # 对象路径：Hive 分区格式 (year/month/day/hour/minute)
@@ -96,11 +104,25 @@ sinks:
     framing:
       method: newline_delimited
 
-    # 批次控制：攒够或超时后 flush
+    # ================================================================
+    # 批次控制（OSS 最佳实践：减少小对象与 PUT 请求次数）
+    # 事件按 key_prefix 模板自动分桶（每个分钟分区独立成批，互不干扰）
+    # ================================================================
     batch:
-      timeout_secs: 15           # 最长等待 15 秒
-      max_bytes: 10485760        # 10 MB
+      timeout_secs: 300          # 分区桶 5 分钟无新事件即 flush
+      max_bytes: 33554432        # 32 MB
       max_events: 100000
+
+    # 磁盘 buffer：OSS 故障时事件落盘暂存（data_dir 命名卷），恢复后续传
+    # 演示栈日志可再生，1 GiB 足够；写满后背压暂停读取，不丢数据
+    buffer:
+      type: disk
+      max_size: 1073741824       # 1 GiB
+      when_full: block
+
+    # 端到端 at-least-once：OSS 写入成功确认后，file source 才推进 checkpoint
+    acknowledgements:
+      enabled: true
 
     # 认证：从 secret 文件引用
     auth:
@@ -112,12 +134,12 @@ sinks:
   # ------------------------------------------------------------------
   aliyun_oss_parquet:
     type: aws_s3
-    inputs: [partition]
+    inputs: [parquet_prepare]
 
     # OSS 连接配置 (同上)
     bucket: vector-demo
-    region: cn-shenzhen
-    endpoint: https://oss-cn-shenzhen.aliyuncs.com
+    region: cn-hangzhou
+    endpoint: https://oss-cn-hangzhou.aliyuncs.com
     force_path_style: false
 
     # 对象路径：Hive 分区格式 (无 minute，Parquet 按小时聚合)
@@ -133,13 +155,23 @@ sinks:
       codec: parquet
       schema_mode: auto_infer    # 自动推断 schema，无需预定义
       compression:
-        algorithm: snappy        # 列页内压缩：snappy (快) | zstd (高压缩比) | gzip | lz4 | none
+        algorithm: zstd          # 列页内压缩：zstd (高压缩比，较 snappy 省 ~20-30% 存储) | snappy (快)
+        level: 3                 # Vector 0.58 要求 zstd 必须显式配置 level；选型见 ../docs/ZSTD_VS_SNAPPY.md
 
-    # 批次控制
+    # 批次控制（小时分区桶）：64MB 上限避免小文件泛滥
     batch:
-      timeout_secs: 15
-      max_bytes: 10485760        # 10 MB
+      timeout_secs: 300
+      max_bytes: 67108864        # 64 MB
       max_events: 100000
+
+    # 磁盘 buffer + acknowledgements：与 JSON sink 相同的可靠性策略
+    buffer:
+      type: disk
+      max_size: 1073741824       # 1 GiB
+      when_full: block
+
+    acknowledgements:
+      enabled: true
 
     # 认证
     auth:

@@ -97,7 +97,7 @@ step-vector/
 | 格式 | Sink 类型 | 编码 | 压缩 | 说明 |
 |------|-----------|------|------|------|
 | JSON | `aws_s3` | `raw_message` | gzip | 原始日志行，下游直接消费 |
-| Parquet | `aws_s3` | `batch_encoding: parquet` | snappy | 列式格式，Athena/EMR 友好 |
+| Parquet | `aws_s3` | `batch_encoding: parquet` | zstd (level 3) | 列式格式，Athena/EMR 友好；选型见 [ZSTD_VS_SNAPPY](docs/ZSTD_VS_SNAPPY.md) |
 
 ### 分区格式 (Hive 风格)
 
@@ -124,7 +124,7 @@ podman compose up -d
 podman compose logs -f vector
 
 # 查询 (需要本地安装 DuckDB)
-duckdb -c "CREATE OR REPLACE SECRET oss (TYPE s3, PROVIDER config, KEY_ID 'YOUR_KEY', SECRET 'YOUR_SECRET', ENDPOINT 'oss-cn-shenzhen.aliyuncs.com', REGION 'cn-shenzhen', URL_STYLE 'vhost', USE_SSL true);"
+duckdb -c "CREATE OR REPLACE SECRET oss (TYPE s3, PROVIDER config, KEY_ID 'YOUR_KEY', SECRET 'YOUR_SECRET', ENDPOINT 'oss-cn-hangzhou.aliyuncs.com', REGION 'cn-hangzhou', URL_STYLE 'vhost', USE_SSL true);"
 duckdb -f duckdb/queries.sql
 ```
 

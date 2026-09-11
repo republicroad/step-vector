@@ -40,7 +40,7 @@ Vector 同时输出 JSON 和 Parquet 两种格式：
 | Sink | Bucket | 格式 | 压缩 | 路径前缀 |
 |------|--------|------|------|----------|
 | `aliyun_oss` | `vector-demo` | gzip JSON lines | gzip | `log_json/year=.../month=.../day=.../hour=.../minute=.../` |
-| `aliyun_oss_parquet` | `vector-demo` | Parquet | snappy | `log_parquet/year=.../month=.../day=.../hour=.../` |
+| `aliyun_oss_parquet` | `vector-demo` | Parquet | zstd (level 3) | `log_parquet/year=.../month=.../day=.../hour=.../` |
 
 ### Parquet 配置
 
@@ -51,15 +51,16 @@ batch_encoding:
   codec: parquet
   schema_mode: auto_infer        # 自动推断 schema
   compression:
-    algorithm: snappy            # gzip | lz4 | none | snappy | zstd
+    algorithm: zstd              # 选型依据见 ../docs/ZSTD_VS_SNAPPY.md
+    level: 3                     # Vector 0.58 要求 zstd 必须显式配置 level
 ```
 
 ### 与 RustFS 配置的主要差异
 
 | 配置项 | 阿里云 OSS | RustFS |
 |--------|-----------|--------|
-| `endpoint` | `https://oss-cn-shenzhen.aliyuncs.com` | `http://rustfs:9000` |
-| `region` | `cn-shenzhen` | `us-east-1`（默认） |
+| `endpoint` | `https://oss-cn-hangzhou.aliyuncs.com` | `http://rustfs:9000` |
+| `region` | `cn-hangzhou` | `us-east-1`（默认） |
 | `force_path_style` | `false`（OSS 仅支持 vhost） | `true`（RustFS 支持 path-style） |
 | `bucket` | 已有 bucket | 需先创建（bucket-init 自动完成） |
 
@@ -167,7 +168,7 @@ secret:
 ### 阿里云 OSS（aws_s3 sink）
 
 - `endpoint`：外网 `https://oss-{region}.aliyuncs.com`；同地域 ECS 内网免流量 `https://oss-{region}-internal.aliyuncs.com`
-- `region`：Bucket 所在地域 ID（如 `cn-shenzhen`），必须与 Bucket 一致，否则 `NoSuchBucket`
+- `region`：Bucket 所在地域 ID（如 `cn-hangzhou`），必须与 Bucket 一致，否则 `NoSuchBucket`
 - `force_path_style: false`：OSS 要求虚拟托管寻址（域名 `<bucket>.oss-{region}.aliyuncs.com`）；私有/自建 S3 兼容服务可设 `true`
 - 凭证是**阿里云 RAM AccessKey**，不是 AWS 的，勿混用
 - `key_prefix` 支持两种时间基准（处理时间 / 事件时间），见下节「分区时间基准」
@@ -185,7 +186,8 @@ secret:
     codec: parquet
     schema_mode: auto_infer   # 按批自动推断 schema，无需 schema 文件
     compression:
-      algorithm: snappy       # gzip | lz4 | none | snappy | zstd
+      algorithm: zstd         # gzip | lz4 | none | snappy | zstd
+      level: 3                # Vector 0.58 要求 zstd 必须显式配置 level
   ```
 - **schema_mode**：`auto_infer` 无需 schema 文件；`relaxed`/`strict` 需 `batch_encoding.schema_file` 指向原生 Parquet schema 文件（缺字段置 null / 多字段报错）
 - **压缩旁路**：设了 `batch_encoding` 后，sink 顶层 `compression` 与 `framing` 会被旁路——Parquet 自带列页内压缩（即 `batch_encoding.compression`）
@@ -341,8 +343,8 @@ CREATE OR REPLACE SECRET oss (
     PROVIDER config,
     KEY_ID 'LTAI5txxxxxxxxxxxx',
     SECRET 'xxxxxxxxxxxxxxxxxxxxxxxx',
-    ENDPOINT 'oss-cn-shenzhen.aliyuncs.com',
-    REGION 'cn-shenzhen',
+    ENDPOINT 'oss-cn-hangzhou.aliyuncs.com',
+    REGION 'cn-hangzhou',
     URL_STYLE 'vhost',
     USE_SSL true
 );
@@ -395,8 +397,8 @@ WHERE year = '2026' AND month = '08' AND day = '21';
 |--------|-----|------|
 | `URL_STYLE` | `vhost` | OSS 使用虚拟托管寻址 |
 | `USE_SSL` | `true` | OSS 使用 HTTPS |
-| `REGION` | `cn-shenzhen` | Bucket 所在地域 |
-| `ENDPOINT` | `oss-cn-shenzhen.aliyuncs.com` | OSS 端点 |
+| `REGION` | `cn-hangzhou` | Bucket 所在地域 |
+| `ENDPOINT` | `oss-cn-hangzhou.aliyuncs.com` | OSS 端点 |
 
 ## 权限速查
 
