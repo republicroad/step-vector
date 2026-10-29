@@ -1,32 +1,40 @@
 # ============================================================
-# Vector K8s DaemonSet 配置：容器 stdout → 阿里云 OSS
-# 适用于：阿里云 ACK / 自建 K8s (containerd)，节点级采集
+# Vector K8s DaemonSet · chart layer
+# Helm installs the workload (DaemonSet/SA/Service); the Vector config itself
+# lives in ConfigMaps (vector-cm.yaml) - never inside this values file.
 # ============================================================
 #
-# 使用方式：
-#   helm upgrade --install vector vector/vector \
-#     -n vector --create-namespace \
-#     -f values.yaml -f values.cluster-a.yaml
+# Usage:
+#   1) kubectl apply -f vector-cm.yaml -n vector        # two CMs at once (no params inside)
+#   2) kubectl -n vector create secret generic vector-oss-secrets \
+#        --from-file=oss-secrets.json=<path outside git>
+#   3) helm upgrade --install vector vector/vector --version 0.51.0 \
+#        -n vector --create-namespace \
+#        -f values.yaml -f values.cluster-a.yaml
 #
-# 依赖：https://github.com/vectordotdev/helm-charts (vector chart)
-# 详细说明见同目录 README.md
+# Version lock (do not float - see CM_BEST_PRACTICES.md):
+#   chart 0.51.0 + image 0.58.0-alpine (mirror prefix; nodes cannot reach docker.io)
 
 role: Agent
 
-# ------------------------------------------------------------------
-# checkpoint 持久化：落在节点盘，Pod 重建不丢断点
-# ------------------------------------------------------------------
+# image lock: mirror prefix (nodes cannot reach docker.io directly -实测 i/o timeout)
+image:
+  repository: docker.1ms.run/timberio/vector
+  tag: 0.58.0-alpine
+  pullPolicy: IfNotPresent
+
+# checkpoint persistence on node disk: pod restart resumes from checkpoint,
+# no re-read of old logs
 persistence:
   hostPath:
     enabled: true
     path: /var/lib/vector
 
 # ------------------------------------------------------------------
-# OSS 密钥挂载：k8s Secret → 容器文件
+# OSS credentials: DIRECTORY mount into a dedicated path.
+# Never subPath a single file into the chart config mountpoint - containerd
+# reports "not a directory" (see CM_BEST_PRACTICES.md pit #4).
 # ------------------------------------------------------------------
-# 创建 Secret（复用 vector2oss/secrets/oss-secrets.json）：
-#   kubectl -n vector create secret generic vector-oss-secrets \
-#     --from-file=oss-secrets.json=../../vector2oss/secrets/oss-secrets.json
 extraVolumes:
   - name: oss-secrets
     secret:
@@ -34,186 +42,31 @@ extraVolumes:
 
 extraVolumeMounts:
   - name: oss-secrets
-    mountPath: /etc/vector/oss-secrets.json
-    subPath: oss-secrets.json
+    mountPath: /etc/oss-secrets
     readOnly: true
 
-# ------------------------------------------------------------------
-# 资源与调度
-# ------------------------------------------------------------------
 resources:
   requests: { cpu: 200m, memory: 256Mi }
   limits: { memory: 1Gi }
 
-# 需采集 master/边缘节点时再放开
+# demo cluster has no taints; a production DaemonSet must tolerate all NoSchedule
+# taints - otherwise tainted nodes silently get NO agent (pit #10)
 tolerations: []
 
+# Agent needs no Service; in existingConfigMaps mode the chart renders an
+# empty-port Service unless disabled (pit #13)
+service:
+  enabled: false
+
 # ------------------------------------------------------------------
-# Vector 配置（customConfig 完全覆盖 chart 默认值）
+# Vector config is externalized: the chart only mounts the ConfigMaps.
+# --config-dir /etc/vector/ loads files in lexicographic order:
+#   10-common.yaml (source/transform/route/dead_letter)
+#   -> 20-oss.yaml (sinks; bucket/region/endpoint are ${VAR} placeholders,
+#      expanded by Vector at load time from Pod env injected via the overlay)
+# CM content: vector-cm.yaml (apply it BEFORE this release - CM must exist first)
 # ------------------------------------------------------------------
-customConfig:
-  data_dir: /vector-data-dir
-
-  # chart 健康探针依赖 api
-  api:
-    enabled: true
-
-  timezone: Asia/Shanghai
-
-  # ------------------------------------------------------------------
-  # 密钥管理：file 后端，不落明文
-  # ------------------------------------------------------------------
-  secret:
-    oss_credentials:
-      type: file
-      path: /etc/vector/oss-secrets.json
-
-  # ------------------------------------------------------------------
-  # 数据源：节点级采集所有容器 stdout/stderr
-  # ------------------------------------------------------------------
-  sources:
-    k8s_logs:
-      type: kubernetes_logs
-      auto_partial_merge: true        # CRI partial 行自动合并
-      glob_minimum_cooldown_ms: 1000  # 新文件发现间隔
-      max_line_bytes: 262144          # 256KB，防超长 JSON 行被丢
-      ignore_older_secs: 86400        # 忽略超 24h 的旧文件，防止重启全量重读
-      read_from: beginning
-
-  # ------------------------------------------------------------------
-  # 转换：JSON 解析 + 分区字段 + 有效性路由
-  # ------------------------------------------------------------------
-  transforms:
-    # 第一步：解析 NDJSON 行，校验埋点契约字段
-    parse:
-      type: remap
-      inputs: [k8s_logs]
-      drop_on_error: false
-      source: |
-        # 运行时读取环境变量注入集群标识（避开 v0.57+ 默认禁用 ${VAR} 插值）
-        .cluster = get_env_var!("VECTOR_CLUSTER_NAME")
-        if !starts_with(.message, "{") {
-          .valid = false              # 非 JSON：框架/文本日志
-        } else {
-          raw_line = .message         # 保留原始行，raw_message 编码需要
-          parsed, err = parse_json(.message)
-          if err == null && is_object(parsed) &&
-             !is_null(parsed.trace_id) && !is_null(parsed.ts) &&
-             !is_null(parsed.tenant_id) && !is_null(parsed.service_id) {
-            . = merge!(., parsed)     # 字段提升到顶层（parquet schema 需要）
-            .message = raw_line       # 恢复原始 JSON 行
-            .valid = true
-            # 事件时间戳（RFC3339/ISO8601）
-            # 若 ts 为毫秒时间戳改为：
-            #   .timestamp = from_unix_timestamp(to_int!(.ts), unit: "milliseconds")
-            if is_string(.ts) {
-              ts, ts_err = parse_timestamp(.ts, format: "%+")
-              if ts_err == null {
-                .timestamp = ts       # 用事件时间，分区用它
-              } else {
-                log("ts not RFC3339, partition falls back to ingest time: " + ts_err, level: "warn")
-              }
-            }
-          } else {
-            .valid = false            # JSON 但缺埋点字段
-          }
-        }
-
-    # 第二步：事件时间 → Hive 分区字段（北京时间）
-    partition:
-      type: remap
-      inputs: [parse]
-      source: |
-        .partition_year   = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
-        .partition_month  = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
-        .partition_day    = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
-        .partition_hour   = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
-        .partition_minute = format_timestamp!(.timestamp, format: "%M", timezone: "Asia/Shanghai")
-
-    # 第三步：按有效性路由，有效的进 OSS，无效的进兜底
-    route:
-      type: route
-      inputs: [partition]
-      routes:
-        valid:
-          type: static
-          condition: ".valid == true"
-      # route._unmatched 自动捕获不满足任何条件的事件
-
-  # ------------------------------------------------------------------
-  # 输出：JSON + Parquet 双写 OSS（参照 vector2oss 已验证配置）
-  # ------------------------------------------------------------------
-  sinks:
-    # -- JSON 行（gzip）→ OSS，分钟级分区 ----------------------------
-    aliyun_oss:
-      type: aws_s3                 # OSS 兼容 S3 API
-      inputs: [route.valid]
-
-      bucket: vector-demo
-      region: cn-shenzhen          # 必须与 Bucket 地域一致，否则 NoSuchBucket
-
-      # ACK 同地域 → 内网 endpoint，流量免费、不出公网
-      # 跨地域/混合云/自建 IDC → 公网 endpoint（外网流出流量计费）
-      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
-      force_path_style: false      # OSS 仅支持虚拟托管寻址
-
-      key_prefix: "k8s/{{ cluster }}/log_json/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/minute={{ partition_minute }}/"
-      timezone: Asia/Shanghai
-      filename_time_format: "%s"
-      filename_append_uuid: true
-
-      compression: gzip
-      encoding:
-        codec: raw_message         # 对象内容 = 原始 JSON 行
-      framing:
-        method: newline_delimited
-
-      batch:
-        timeout_secs: 15           # 最长等待 15 秒
-        max_bytes: 10485760        # 10 MB
-        max_events: 100000
-
-      auth:
-        access_key_id: SECRET[oss_credentials.access_key_id]
-        secret_access_key: SECRET[oss_credentials.secret_access_key]
-
-    # -- Parquet 列式 → OSS（下游 Athena/EMR/DuckDB 分析友好）--------
-    aliyun_oss_parquet:
-      type: aws_s3
-      inputs: [route.valid]
-
-      bucket: vector-demo
-      region: cn-shenzhen
-      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
-      force_path_style: false
-
-      # Parquet 按小时聚合，无 minute 层（减少小文件）
-      key_prefix: "k8s/{{ cluster }}/log_parquet/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
-      timezone: Asia/Shanghai
-      filename_time_format: "%s"
-      filename_append_uuid: true
-
-      encoding:
-        codec: json                # 占位，batch_encoding 接管
-      batch_encoding:
-        codec: parquet
-        schema_mode: auto_infer    # 自动推断 schema
-        compression:
-          algorithm: snappy        # gzip | snappy | zstd | lz4 | none
-
-      batch:
-        timeout_secs: 15
-        max_bytes: 10485760
-        max_events: 100000
-
-      auth:
-        access_key_id: SECRET[oss_credentials.access_key_id]
-        secret_access_key: SECRET[oss_credentials.secret_access_key]
-
-    # -- 兜底：不合格式的事件进 stderr（观察期排障）-----------------
-    dead_letter:
-      type: console
-      inputs: [route._unmatched]
-      target: stderr
-      encoding:
-        codec: json
+dataDir: /vector-data-dir
+existingConfigMaps:
+  - vector-common
+  - vector-oss

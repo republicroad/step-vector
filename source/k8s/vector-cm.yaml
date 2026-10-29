@@ -1,0 +1,256 @@
+# ============================================================
+# Vector ConfigMap manifest · multi-document · env-injected params
+# Notes: namespace not in manifest, apply with -n <ns>; two CMs created/updated at once.
+# Params are NOT in this manifest: bucket/region/endpoint are written as
+#   placeholders (PROD_BUCKET/PROD_REGION/OSS_ENDPOINT) and expanded by Vector at
+#   config load time from Pod env (injected via chart overlay values.cluster-a.yaml).
+# Interpolation switch: Vector >=0.57 disables env interpolation by default (official
+#   change) - the overlay must inject VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION=true.
+#   With it enabled the whole file (comments included) is interpolated: do NOT leave
+#   undefined dollar-brace sequences anywhere in this file.
+# Change flow: edit data section -> vector validate (with dummy env) -> kubectl apply -f
+#   -> kubectl rollout restart daemonset/vector
+# Documents:
+#   (1) vector-common   key 10-common.yaml (source / four-way parse / route / dead_letter)
+#   (2) vector-oss      key 20-oss.yaml   (sinks: valid -> track lake, bad -> track_bad)
+# ============================================================
+# ---- Document (1) vector-common ----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-common
+  labels:
+    app.kubernetes.io/name: vector
+    app.kubernetes.io/instance: vector
+    app.kubernetes.io/managed-by: kubectl
+data:
+  10-common.yaml: |
+    data_dir: /vector-data-dir
+
+    # api for vector top / internal observability
+    api:
+      enabled: true
+      address: 0.0.0.0:8686
+
+    timezone: Asia/Shanghai
+
+    secret:
+      oss_credentials:
+        type: file
+        path: /etc/oss-secrets/oss-secrets.json
+
+    sources:
+      k8s_logs:
+        type: kubernetes_logs
+        auto_partial_merge: true        # merge CRI partial lines
+        glob_minimum_cooldown_ms: 1000  # new-file discovery interval
+        max_line_bytes: 262144          # 256KB, keep long JSON lines
+        ignore_older_secs: 86400        # skip files older than 24h on startup
+        read_from: beginning
+
+    transforms:
+      # parse: four-way classification on generic fields (user/ts/event)
+      #   (1) user/ts/event all present        -> .valid=true -> route.track -> OSS lake
+      #   (2) JSON missing any of the three, but ts/event_version present -> .bad=true
+      #                                        -> route.bad  -> track_bad/ prefix (replayable)
+      #   (3) JSON missing fields, no features -> _unmatched (stderr, never into OSS)
+      #   (4) non-JSON text lines              -> _unmatched (stderr)
+      #   event_version is a partition field: defaulted to 1 when missing
+      parse:
+        type: remap
+        inputs: [k8s_logs]
+        drop_on_error: false
+        source: |
+          .cluster = get_env_var!("VECTOR_CLUSTER_NAME")
+          .valid = false
+          .bad = false
+          if !starts_with!(.message, "{") {
+            .bad = false          # non-JSON: framework/text log, dropped (empty VRL block is illegal)
+          } else {
+            raw_line = .message
+            parsed, err = parse_json(.message)
+            if err == null && is_object(parsed) {
+              _c_user   = !is_null(parsed.user)
+              _c_ts     = !is_null(parsed.ts)
+              _c_event  = !is_null(parsed.event)
+              if _c_user && _c_ts && _c_event {
+                . = merge!(., parsed)
+                .message = raw_line
+                .valid = true
+                # defensive default: event_version missing -> 1 (partition field)
+                if is_null(.event_version) { .event_version = 1 }
+                # event time: primary ts (RFC3339 expected)
+                if is_string(.ts) {
+                  ts, ts_err = parse_timestamp(.ts, format: "%+")
+                  if ts_err == null {
+                    .timestamp = ts
+                  } else {
+                    .timestamp = now()
+                    log("ts not RFC3339, partition falls back to ingest time: " + ts_err, level: "warn")
+                  }
+                } else {
+                  .timestamp = now()
+                }
+              } else if !is_null(parsed.ts) || !is_null(parsed.event_version) {
+                # bad: contract-violating but feature-bearing (ts/event_version) -> replayable
+                . = merge!(., parsed)
+                .message = raw_line
+                .bad = true
+                if is_string(.ts) {
+                  bts, bts_err = parse_timestamp(.ts, format: "%+")
+                  if bts_err == null {
+                    .timestamp = bts
+                  } else {
+                    .timestamp = now()
+                  }
+                } else {
+                  .timestamp = now()
+                }
+              }
+              # rest: JSON without features -> _unmatched (stderr), never into OSS
+            }
+          }
+
+      partition:
+        type: remap
+        inputs: [parse]
+        source: |
+          # drop empty objects/arrays; partition fields are shared by all sinks
+          . = filter(object(.)) -> |_key, value| {
+            !(is_object(value) && length(object!(value)) == 0) && !(is_array(value) && length(array!(value)) == 0)
+          }
+          if is_object(.kubernetes) {
+            if is_object(.kubernetes.pod_labels) && length(object!(.kubernetes.pod_labels)) == 0 { del(.kubernetes.pod_labels) }
+            if is_object(.kubernetes.pod_annotations) && length(object!(.kubernetes.pod_annotations)) == 0 { del(.kubernetes.pod_annotations) }
+            if is_array(.kubernetes.pod_ips) && length(array!(.kubernetes.pod_ips)) == 0 { del(.kubernetes.pod_ips) }
+          }
+
+          if is_timestamp(.timestamp) {
+            .partition_year  = format_timestamp!(.timestamp, format: "%Y", timezone: "Asia/Shanghai")
+            .partition_month = format_timestamp!(.timestamp, format: "%m", timezone: "Asia/Shanghai")
+            .partition_day   = format_timestamp!(.timestamp, format: "%d", timezone: "Asia/Shanghai")
+            .partition_hour  = format_timestamp!(.timestamp, format: "%H", timezone: "Asia/Shanghai")
+          }
+
+      route:
+        type: route
+        inputs: [partition]
+        route:
+          track: ".valid == true"
+          bad: ".bad == true"   # mutually exclusive with track (.valid / .bad)
+
+    sinks:
+      # dead_letter consumes route._unmatched: non-JSON lines + JSON without features
+      # (never into OSS)
+      dead_letter:
+        type: console
+        inputs: [route._unmatched]
+        target: stderr
+        encoding:
+          codec: json
+---
+# ---- Document (2) vector-oss ----
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vector-oss
+  labels:
+    app.kubernetes.io/name: vector
+    app.kubernetes.io/instance: vector
+    app.kubernetes.io/managed-by: kubectl
+data:
+  20-oss.yaml: |
+    sinks:
+      # -- valid events (JSON lines, gzip) -> OSS track/event_version=N/ Hive layout --
+      # layout: partition = version + time; user/event are row fields
+      #   event_version -> first-level partition (int rendered event_version=2; defaulted
+      #                    to 1 when missing)
+      #   ts            -> partition_year/.../hour (four-level time partition,
+      #                    timezone Asia/Shanghai)
+      # incremental consumption: object name = epoch seconds (sortable) + uuid; prune
+      # by day= prefix, or filter by object LastModified
+      #
+      # {{ }} is Vector runtime template syntax, written verbatim (no helm escaping);
+      # PROD_BUCKET/PROD_REGION/OSS_ENDPOINT are expanded at config load time
+      # from Pod env (injected via chart overlay; this manifest contains no real params)
+      track_oss:
+        type: aws_s3
+        inputs: [route.track]
+
+        # missing variable = Vector fails at startup (fail fast): the overlay must
+        # inject all three
+        bucket: "${PROD_BUCKET}"
+        region: "${PROD_REGION}"
+        endpoint: "${OSS_ENDPOINT}"
+        force_path_style: false
+
+        key_prefix: "track/event_version={{ event_version }}/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
+        timezone: Asia/Shanghai
+        filename_time_format: "%s"
+        filename_append_uuid: true
+
+        compression: gzip
+        encoding:
+          codec: raw_message        # object content = raw JSON line
+        framing:
+          method: newline_delimited
+
+        batch:
+          timeout_secs: 600         # 10 min flush window (freshness vs file count)
+          max_bytes: 33554432       # 32 MB
+          max_events: 100000
+
+        # disk buffer: events spill to node disk when OSS is unavailable
+        buffer:
+          type: disk
+          max_size: 2147483648      # 2 GiB
+          when_full: block
+
+        # end-to-end at-least-once: file checkpoint advances only after OSS write ack
+        acknowledgements:
+          enabled: true
+
+        auth:
+          access_key_id: SECRET[oss_credentials.access_key_id]
+          secret_access_key: SECRET[oss_credentials.secret_access_key]
+
+      # -- bad rows -> track_bad/ prefix: contract-violating but feature-bearing,
+      # replayable. Physically isolated from the lake; raw lines kept; time-only
+      # partition (fields may be missing). Consider a dedicated OSS lifecycle for
+      # this prefix (e.g. 90d).
+      track_bad_oss:
+        type: aws_s3
+        inputs: [route.bad]
+
+        bucket: "${PROD_BUCKET}"
+        region: "${PROD_REGION}"
+        endpoint: "${OSS_ENDPOINT}"
+        force_path_style: false
+
+        key_prefix: "track_bad/year={{ partition_year }}/month={{ partition_month }}/day={{ partition_day }}/hour={{ partition_hour }}/"
+        timezone: Asia/Shanghai
+        filename_time_format: "%s"
+        filename_append_uuid: true
+
+        compression: gzip
+        encoding:
+          codec: raw_message
+        framing:
+          method: newline_delimited
+
+        batch:
+          timeout_secs: 600
+          max_bytes: 33554432       # 32 MB
+          max_events: 100000
+
+        buffer:
+          type: disk
+          max_size: 2147483648      # 2 GiB
+          when_full: block
+
+        acknowledgements:
+          enabled: true
+
+        auth:
+          access_key_id: SECRET[oss_credentials.access_key_id]
+          secret_access_key: SECRET[oss_credentials.secret_access_key]

@@ -1,24 +1,25 @@
 # ============================================================
-# 集群 overlay 示例（cluster-a）
-# 复制此文件为 values.cluster-b.yaml 等，每个集群只改三样
+# Cluster overlay (pairs with values.yaml): per-cluster params via env
+# Vector expands ${PROD_BUCKET}/${PROD_REGION}/${OSS_ENDPOINT} at config load time.
 # ============================================================
 #
-# 安装：
-#   helm upgrade --install vector vector/vector \
-#     -n vector --create-namespace \
-#     -f values.yaml -f values.cluster-a.yaml
+# Copy to values.cluster-b.yaml and change the three S3 values + cluster name.
+# env list order is irrelevant; every entry must be present (missing variable =
+# Vector fails at startup, fail fast).
 
 env:
   - name: VECTOR_CLUSTER_NAME
     value: "cluster-a"
-
-# 按集群覆盖 sink 地域和 endpoint
-# ACK 同地域优先用内网 endpoint（免费且不出公网）
-customConfig:
-  sinks:
-    aliyun_oss:
-      region: cn-shenzhen
-      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
-    aliyun_oss_parquet:
-      region: cn-shenzhen
-      endpoint: https://oss-cn-shenzhen-internal.aliyuncs.com
+  - name: PROD_BUCKET
+    value: "vector-demo"
+  - name: PROD_REGION
+    value: "cn-shenzhen"
+  - name: OSS_ENDPOINT
+    value: "https://oss-cn-shenzhen-internal.aliyuncs.com"   # same-region internal (free traffic)
+  # Vector >=0.57 disables config env interpolation by default (official change):
+  # the ${VAR} placeholders in vector-cm.yaml depend on this switch. Security note:
+  # env is readable by anyone who can read /proc/<pid>/environ - keep only
+  # non-sensitive scalars here (bucket/region/endpoint); credentials live in the
+  # mounted Secret, never in env.
+  - name: VECTOR_DANGEROUSLY_ALLOW_ENV_VAR_INTERPOLATION
+    value: "true"
