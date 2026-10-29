@@ -1,10 +1,13 @@
 # Vector 日志采集 → 阿里云 OSS
 
+> 背景：Vector 写阿里云 OSS（JSON + Parquet 双输出、Hive 分区）+ DuckDB 查询的完整示例。
+> 场景与结论：compose 起容器离线可跑；DuckDB Secret 配置详见 docs/duckdb-s3.md。
+
 使用 [Vector](https://vector.dev) 采集本地磁盘日志（`file` source），写入阿里云 OSS（`aws_s3` sink，OSS 兼容 S3 API）。容器化部署（Docker Compose），断点续传 + 密钥托管。
 
 ## 目录结构
 
-```
+```text
 step-vector/
 ├── vector.yaml          # Vector 配置（JSON + Parquet 双输出）
 ├── secrets/
@@ -51,7 +54,7 @@ batch_encoding:
   codec: parquet
   schema_mode: auto_infer        # 自动推断 schema
   compression:
-    algorithm: zstd              # 选型依据见 ../docs/ZSTD_VS_SNAPPY.md
+    algorithm: zstd              # 选型依据见 ../docs/zstd-vs-snappy.md
     level: 3                     # Vector 0.58 要求 zstd 必须显式配置 level
 ```
 
@@ -286,7 +289,7 @@ if err == null && is_object(parsed) {
 
 `log()` 的第一个参数必须是不可失败表达式，但 `string(ts_err)`（对 error 类型转换）和 `"..." + 非字符串` 都是可失败的：
 
-```
+```text
 error[E630]: fallible argument
   log("...: " + string(ts_err), level: "warn")
 ```

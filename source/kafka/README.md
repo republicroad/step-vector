@@ -1,12 +1,15 @@
 # Vector 消费 Kafka → 阿里云 OSS
 
+> 背景：Vector kafka source 消费 topic 写入 OSS（JSON + Parquet 双输出）的端到端容器化示例。
+> 场景与结论：compose 一键起 Kafka + Vector 离线可跑；SASL/消费组配置要点见正文。
+
 使用 [Vector](https://vector.dev) 的 **`kafka` source**（librdkafka 消费者）消费 Kafka topic 中的 JSON 日志，解析后按事件时间 Hive 分区写入阿里云 OSS（`aws_s3` sink，OSS 兼容 S3 API）。支持 JSON + Parquet 双输出。
 
 典型场景：业务服务把埋点/日志发到 Kafka（削峰解耦），Vector 作为消费组一员旁路消费，落 OSS 做冷数据湖（回测、特征、审计），与 [vector2oss](../../vector2oss/README.md) 的 file source 采集互为补充。
 
 ## 目录结构
 
-```
+```text
 source/kafka/
 ├── vector.yaml                      # 生产配置：kafka source → OSS (JSON + Parquet)
 ├── vector-test.yaml                 # 测试配置：kafka source → console（离线验证）
@@ -21,7 +24,7 @@ source/kafka/
 
 ## 架构
 
-```
+```text
 ┌──────────┐  JSON 行   ┌─────────────────────────────┐
 │ 业务服务 │ ─────────▶ │ Kafka topic: app-logs       │
 │ producer │  key=oid   │ 3 partitions (KRaft 单节点) │

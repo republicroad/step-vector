@@ -1,12 +1,15 @@
 # Hive Partitioning 测试文档
 
+> 背景：DuckDB 对 Hive 风格分区（key=value 目录）的自动检测与分区裁剪实测记录。
+> 场景与结论：设计对象存储日志的分区层级时参考；实测 auto 检测无需显式 hive_partitioning=true。
+
 ## 概述
 
 Hive Partitioning 是一种数据组织方式，将数据按目录结构分区存储。DuckDB 自动检测 `key=value` 格式的目录，并将分区列添加到查询结果中。
 
 ## 目录结构
 
-```
+```text
 s3://log-data/log_json/
 ├── year=2026/
 │   └── month=08/

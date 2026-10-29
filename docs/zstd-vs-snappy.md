@@ -1,4 +1,6 @@
 # 压缩算法对比：zstd vs snappy（Parquet 场景）
+> 背景：Vector Parquet 输出的压缩算法 zstd 与 snappy 实测对比（同数据集、同批次配置）。
+> 场景与结论：列式输出压缩选型参考；实测结论（大小/速度/兼容性）见正文数据表。
 
 ## 概述
 
@@ -60,6 +62,6 @@ JSON sink（`raw_message` + `newline_delimited`）仍用 `compression: gzip`：g
 
 ## 相关文档
 
-- [Vector Parquet 最佳实践](VECTOR_PARQUET_BEST_PRACTICES.md)
-- [Hive Partitioning](HIVE_PARTITIONING.md)
+- [Vector Parquet 最佳实践](vector-parquet-best-practices.md)
+- [Hive Partitioning](hive-partitioning.md)
 - source/sls README「OSS 写入最佳实践」小节

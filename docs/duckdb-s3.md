@@ -1,5 +1,8 @@
 # DuckDB 对象存储（S3/OSS/RustFS）配置指南
 
+> 背景：DuckDB 经 httpfs 扩展读取 S3/OSS/RustFS 的 Secret 配置方式与查询指南。
+> 场景与结论：分析侧连接对象存储时照抄；SCOPE 多凭证分域与虚拟托管寻址为重点。
+
 ## 前置准备
 
 ```sql

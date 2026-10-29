@@ -1,5 +1,8 @@
 # vector-collect — Better Stack Vector 全套采集演示
 
+> 背景：Better Stack 官方 Vector 配置全集的本地容器化演示——真实服务产生日志，Vector 采集解析落本地文件。
+> 场景与结论：按 source 类型选目录照抄；各目录独立离线可跑。
+
 对应 Better Stack 文档 [Send logs and metrics to Better Stack using Vector → Available configs](https://betterstack.com/docs/logs/vector/#available-configs) 中列出的全部 20+ 个现成配置。每个子目录是一个独立的端到端采集演示：**容器化真实服务产生日志 → Vector 采集/解析 → 本地文件落地**（无需 Better Stack token，离线可跑通），每个 `vector.yaml` 内附注释好的 Better Stack 官方 sink 块，取消注释并填入 `SOURCE_TOKEN` / `INGESTING_HOST` 即可切换为推送 Better Stack。
 
 ## 目录对照表
@@ -33,7 +36,7 @@
 
 ## 每个目录的结构
 
-```
+```text
 <service>/
 ├── compose.yaml    # 服务容器（产生日志）+ vector（采集）
 ├── vector.yaml     # source + transform(解析) + sink(本地 file/console + 注释的 better_stack)

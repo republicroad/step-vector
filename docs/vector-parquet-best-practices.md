@@ -1,5 +1,8 @@
 # Vector Parquet 最佳实践
 
+> 背景：Vector batch_encoding Parquet 输出的 schema 模式、压缩算法与批次配置实践。
+> 场景与结论：列式落地（Athena/EMR/DuckDB）选型参考；schema_mode 与压缩取舍见正文实测。
+
 ## 概述
 
 Vector 的 `aws_s3` sink 支持直接输出 Parquet 格式，无需额外 ETL 流程。本文档总结配置最佳实践。
@@ -269,7 +272,7 @@ batch_encoding:
 | 日志多出字段 | **报错**，批次写入失败 |
 
 错误日志：
-```
+```text
 Strict schema mode: event contains field 'user_id' not in schema
 ```
 

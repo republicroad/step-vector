@@ -78,4 +78,4 @@ kubectl -n vector rollout restart daemonset/vector   # 手动滚动（checkpoint
 ## 7. 参考实现
 
 - 生产同源仓：`deploy/manifests/`（手写多文档 CM 清单实例：公共段 + 双机房通用 sink，实参 ${VAR} 化）、`docs/config-management.md`（三形态演进全记录）、`operations/deploy-ack.md`（部署手册与坑位总表）、`curated-compaction/`（同款纪律的 CronJob 部署单元）
-- 本仓 `source/vector2oss/`：OSS sink 参数的先行验证（batch/buffer/acks/parquet）；`docs/VECTOR_PARQUET_BEST_PRACTICES.md`：Parquet 输出专题
+- 本仓 `source/vector2oss/`：OSS sink 参数的先行验证（batch/buffer/acks/parquet）；`docs/vector-parquet-best-practices.md`：Parquet 输出专题

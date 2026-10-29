@@ -14,7 +14,7 @@
 
 ## 目录结构
 
-```
+```text
 source/sls/
 ├── vector-sls.yaml               # 生产配置(公网)：SLS → OSS (JSON + Parquet 双输出)
 ├── vector-sls-intranet.yaml      # 生产配置(内网)：同上，endpoint 换 VPC 内网域名
@@ -30,7 +30,7 @@ source/sls/
 
 ## 架构
 
-```
+```text
 ┌──────────┐  写入日志    ┌─────────────────────────────────────────┐
 │ 业务应用 │ ──────────▶  │ SLS Project: my-project                 │
 │          │              │   Logstore: my-logstore  (= Kafka Topic)│

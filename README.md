@@ -1,17 +1,20 @@
 # Step Vector - 日志采集示例集
 
+> 背景：Vector 采集本地/容器日志写入各类存储后端的容器化示例集——每个子目录是一条独立端到端管道（source/transform/sink）。
+> 场景与结论：按 sink 与 source 选目录照抄快速上手；k8s 生产形态（手写 ConfigMap 外置）见 `source/k8s/`，决策依据见其 `CM_BEST_PRACTICES.md`。
+
 使用 [Vector](https://vector.dev) 采集本地磁盘日志，写入各种存储后端的容器化示例集。每个子目录是一个独立的端到端 pipeline，涵盖 source、transform、sink 全链路。
 
 ## 目录结构
 
-```
+```text
 step-vector/
 ├── README.md                          # 本文件
 ├── .gitignore
 ├── docs/                              # 公共文档
-│   ├── VECTOR_PARQUET_BEST_PRACTICES.md  # Parquet 最佳实践
+│   ├── vector-parquet-best-practices.md  # Parquet 最佳实践
 │   ├── duckdb-s3.md                   # DuckDB 查询 S3/OSS 指南
-│   └── HIVE_PARTITIONING.md           # Hive 分区测试报告
+│   └── hive-partitioning.md           # Hive 分区测试报告
 │
 ├── vector2oss/                        # 阿里云 OSS 示例
 │   ├── vector.yaml                    # 生产配置 (JSON + Parquet 双输出)
@@ -97,11 +100,11 @@ step-vector/
 | 格式 | Sink 类型 | 编码 | 压缩 | 说明 |
 |------|-----------|------|------|------|
 | JSON | `aws_s3` | `raw_message` | gzip | 原始日志行，下游直接消费 |
-| Parquet | `aws_s3` | `batch_encoding: parquet` | zstd (level 3) | 列式格式，Athena/EMR 友好；选型见 [ZSTD_VS_SNAPPY](docs/ZSTD_VS_SNAPPY.md) |
+| Parquet | `aws_s3` | `batch_encoding: parquet` | zstd (level 3) | 列式格式，Athena/EMR 友好；选型见 [ZSTD_VS_SNAPPY](docs/zstd-vs-snappy.md) |
 
 ### 分区格式 (Hive 风格)
 
-```
+```text
 JSON:    year=YYYY/month=MM/day=DD/hour=HH/minute=MM/
 Parquet: year=YYYY/month=MM/day=DD/hour=HH/
 ```
@@ -154,9 +157,9 @@ duckdb -f duckdb/queries.sql
 
 | 文档 | 说明 |
 |------|------|
-| [Parquet 最佳实践](docs/VECTOR_PARQUET_BEST_PRACTICES.md) | schema 模式、压缩、批次配置 |
+| [Parquet 最佳实践](docs/vector-parquet-best-practices.md) | schema 模式、压缩、批次配置 |
 | [DuckDB S3 查询](docs/duckdb-s3.md) | DuckDB 连接 S3/OSS/RustFS |
-| [Hive 分区测试](docs/HIVE_PARTITIONING.md) | 分区裁剪测试报告 |
+| [Hive 分区测试](docs/hive-partitioning.md) | 分区裁剪测试报告 |
 
 ## TODO
 

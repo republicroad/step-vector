@@ -1,10 +1,13 @@
 # Vector 日志采集 → RustFS → DuckDB 查询
 
+> 背景：Vector 写本地 S3 兼容存储 RustFS（JSON + Parquet 双输出）+ DuckDB 查询的完整示例。
+> 场景与结论：compose 含 bucket-init 自动建桶；path 寻址与固定凭证为重点。
+
 使用 [Vector](https://vector.dev) 采集本地磁盘日志，写入 [RustFS](https://docs.rustfs.com/)（自建 S3 兼容存储），通过 [DuckDB](https://duckdb.org) 直接查询 S3 数据。
 
 ## 架构概览
 
-```
+```text
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │  python-log-gen │────▶│     Vector      │────▶│     RustFS      │◀────│     DuckDB      │
 │  (日志生成器)    │     │  (日志采集)      │     │  (S3 存储)       │     │  (数据分析)      │
@@ -19,7 +22,7 @@
 
 ## 目录结构
 
-```
+```text
 vector2rustfs/
 ├── compose.yaml           # 容器编排（rustfs + vector + duckdb + python-log-gen）
 ├── vector.yaml            # Vector 配置（JSON + Parquet 双输出）
@@ -131,7 +134,7 @@ key_prefix: "log_parquet/year={{ partition_year }}/month={{ partition_month }}/d
 
 落地路径示例：
 
-```
+```text
 log-data/
 ├── log_json/
 │   └── year=2026/
@@ -244,7 +247,7 @@ SELECT * FROM read_parquet('s3://log-data/log_parquet/year=2026/month=08/**/*.pa
 
 ### Secret 存储位置
 
-```
+```text
 ~/.duckdb/stored_secrets/
 ├── rustfs secret         # RustFS S3 连接凭证
 └── ...                   # 其他已存储的 secret

@@ -145,5 +145,5 @@ DaemonSet 零侵入：业务 Pod 不用改镜像/声明卷；运行时无关（�
 ## 关联文档
 
 - [CM_BEST_PRACTICES.md](CM_BEST_PRACTICES.md)：两形态对照、八条纪律、坑位对照表（本篇的决策依据）
-- [../../docs/VECTOR_PARQUET_BEST_PRACTICES.md](../../docs/VECTOR_PARQUET_BEST_PRACTICES.md)：Parquet 输出专题（本目录未启用）
+- [../../docs/vector-parquet-best-practices.md](../../docs/vector-parquet-best-practices.md)：Parquet 输出专题（本目录未启用）
 - 生产同源方案：`track-pipeline` 仓（手写 CM 清单实例、${VAR} 化与坑位总表的权威源）
